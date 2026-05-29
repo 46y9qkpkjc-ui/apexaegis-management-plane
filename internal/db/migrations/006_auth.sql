@@ -42,10 +42,10 @@ INSERT INTO system_mgmt.users (id, org_id, email, name, role, password_hash, mfa
 VALUES (
     'b0000000-0000-0000-0000-000000000001',
     'a0000000-0000-0000-0000-000000000001',
-    'admin@apexaegis.io',
+    'admin@apexaegis.app',
     'Administrator',
     'super_admin',
-    '$2a$12$/b.0X8ZI1ikK4U4nS/Y7aOZOvY8sA4yFGiZUmIDHSdVTsi7CUmCIi',
+    '$2a$12$vOYL1ctN71LpjemdG8.qJe4.QgZcgHiNANJWF.oLETDxkqhYPJBAm',
     false,
     'active'
 ) ON CONFLICT (id) DO NOTHING;
