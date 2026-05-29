@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +57,25 @@ func main() {
 
 	// ── Gateway registry ──
 	gwRegistry := gateway.NewRegistry(ca, logger)
+
+	// Seed gateway API keys from environment variables.
+	// Format: GATEWAY_API_KEYS=key1:gatewayID1,key2:gatewayID2
+	// Also supports a single key via GATEWAY_API_KEY=key:gatewayID or just GATEWAY_API_KEY=key (any gateway)
+	if apiKeysEnv := os.Getenv("GATEWAY_API_KEYS"); apiKeysEnv != "" {
+		for _, entry := range strings.Split(apiKeysEnv, ",") {
+			parts := strings.SplitN(strings.TrimSpace(entry), ":", 2)
+			if len(parts) == 2 {
+				gwRegistry.RegisterAPIKey(parts[0], parts[1])
+				logger.Info("Registered gateway API key", zap.String("gateway_id", parts[1]))
+			}
+		}
+	}
+	// Single key shortcut: GATEWAY_API_KEY=<key> (registers for both known gateways)
+	if singleKey := os.Getenv("GATEWAY_API_KEY"); singleKey != "" {
+		gwRegistry.RegisterAPIKey(singleKey, "ap-southeast-1")
+		gwRegistry.RegisterAPIKey(singleKey, "ap-southeast-2")
+		logger.Info("Registered shared gateway API key for ap-southeast-1 and ap-southeast-2")
+	}
 
 	// ── CockroachDB Cloud ──
 	databaseURL := os.Getenv("DATABASE_URL")
