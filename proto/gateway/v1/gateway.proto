@@ -2,13 +2,97 @@ syntax = "proto3";
 
 package apexaegis.gateway.v1;
 
-option go_package = "github.com/apexaegis/proto/gateway/v1;gatewayv1";
+option go_package = "github.com/apexaegis/proto/gateway/v1/gen;gatewayv1";
 
 import "google/protobuf/timestamp.proto";
 
 service GatewayControl {
   rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc SyncPolicies(SyncPoliciesRequest) returns (SyncPoliciesResponse);
+  rpc PolicyStream(PolicyStreamRequest) returns (stream PolicyEvent);
+  rpc ReportTelemetry(stream TelemetryEvent) returns (TelemetryAck);
+  rpc IssueCertificate(CertRequest) returns (CertResponse);
 }
 
-message RegisterRequest { string gateway_id = 1; string name = 3; }
-message RegisterResponse { bool accepted = 1; int64 policy_version = 2; }
+message RegisterRequest {
+  string gateway_id     = 1;
+  string region         = 2;
+  string name           = 3;
+  string location       = 4;
+  string country        = 5;
+  string provider       = 6;
+  string public_host    = 7;
+  string quic_endpoint  = 8;
+  string tls_endpoint   = 9;
+  string ping_endpoint  = 10;
+  string version        = 11;
+  string deploy_mode    = 12;
+  map<string, string> metadata = 13;
+}
+
+message RegisterResponse {
+  bool   accepted       = 1;
+  int64  policy_version = 2;
+  string message        = 3;
+}
+
+message HeartbeatRequest {
+  string gateway_id     = 1;
+  int64  policy_version = 2;
+}
+
+message HeartbeatResponse {
+  bool   acknowledged          = 1;
+  int64  current_policy_version = 2;
+  bool   force_sync            = 3;
+  string command               = 4;
+}
+
+message SyncPoliciesRequest {
+  string gateway_id    = 1;
+  int64  since_version = 2;
+}
+
+message SyncPoliciesResponse {
+  int64                    version   = 1;
+  bool                     full_sync = 2;
+  repeated SecurityPolicy  policies  = 3;
+}
+
+message PolicyStreamRequest {
+  string gateway_id = 1;
+}
+
+message PolicyEvent {
+  string                          type      = 1;
+  int64                           version   = 2;
+  google.protobuf.Timestamp       timestamp = 3;
+}
+
+message TelemetryEvent {
+  string gateway_id  = 1;
+  string event_type  = 2;
+  double value       = 3;
+}
+
+message TelemetryAck {
+  int64 events_received = 1;
+  bool  acknowledged    = 2;
+}
+
+message CertRequest {
+  string gateway_id = 1;
+  bytes  csr        = 2;
+}
+
+message CertResponse {
+  bytes  certificate = 1;
+  bytes  ca_chain    = 2;
+}
+
+message SecurityPolicy {
+  string id      = 1;
+  string name    = 2;
+  string payload = 3;
+}
