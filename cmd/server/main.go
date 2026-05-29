@@ -71,6 +71,7 @@ func main() {
 	// Run schema migrations on startup (idempotent — skips already-applied)
 	migrationsDir := envOrDefault("MIGRATIONS_DIR", "internal/db/migrations")
 	if migErr := dbConn.Migrate(migrationsDir); migErr != nil {
+		fmt.Fprintf(os.Stderr, "MIGRATION ERROR: %v\n", migErr)
 		logger.Fatal("Schema migration failed", zap.Error(migErr))
 	}
 
