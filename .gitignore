@@ -1,0 +1,74 @@
+# ── Build artifacts ────────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── Private keys & certificates ───────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+certs/
+management-plane/certs/
+gateway/certs/local/
+
+# ── Encrypted vault (dev) ─────────────────────────────
+management-plane/dev-vault/
+
+# ── Environment files ─────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.cloud.example
+
+# ── Dependencies ──────────────────────────────────────
+node_modules/
+
+# ── Next.js build output ─────────────────────────────
+.next/
+out/
+
+# ── Go ────────────────────────────────────────────────
+vendor/
+
+# ── Rust / Tauri ──────────────────────────────────────
+desktop-client/src-tauri/target/
+
+# ── IDE / Editor ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS files ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Test output ───────────────────────────────────────
+test-results/
+coverage/
+# Terraform state files
+terraform.tfstate*
+.terraform/
+*.pem
+*.key
+
+# Terraform variables with secrets
+terraform.tfvars.local
+*.auto.tfvars
+
+# Generated files
+.terraform.lock.hcl
+tfplan
+tfplan.json
+
+# Secrets
+tls/
+keys/
+.env
+.env.local
