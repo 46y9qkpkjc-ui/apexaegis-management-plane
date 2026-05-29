@@ -148,6 +148,14 @@ resource "aws_security_group" "alb" {
     description = "HTTP redirect to HTTPS"
   }
 
+  ingress {
+    from_port   = 9443
+    to_port     = 9443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Gateway mTLS API port - ACM PCA client cert required"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -230,15 +238,10 @@ resource "aws_lb_listener" "https" {
   # Gateways present ACM PCA-issued certs; ALB validates against the trust store
   # and forwards the verified cert DN in X-Amzn-Mtls-Clientcert-* headers.
   # Set gateway_trust_store_arn to enable (populated after pca/ workspace is applied).
-  dynamic "mutual_authentication" {
-    for_each = var.gateway_trust_store_arn != "" ? [1] : []
-    content {
-      # "verify" = ALB validates the client cert against the trust store CA.
-      # Verified cert subject is forwarded in X-Amzn-Mtls-Clientcert-Subject header.
-      mode            = "verify"
-      trust_store_arn = var.gateway_trust_store_arn
-    }
-  }
+  # mTLS note: ALB `verify` mode on port 443 rejects all browser/web-UI connections
+  # (they have no client cert). Gateway mTLS is handled at the gRPC layer — the
+  # management plane gRPC server validates the gateway's ACM PCA-issued client cert
+  # against the private CA. The trust store is kept for future NLB-based gateway port.
 
   default_action {
     type             = "forward"
@@ -258,6 +261,31 @@ resource "aws_lb_listener" "http_redirect" {
       protocol    = "HTTPS"
       status_code = "HTTP_301"
     }
+  }
+}
+
+# ── Gateway mTLS listener (port 9443) ─────────────────────────────────────
+# Separate from the public HTTPS listener so mTLS only applies to gateways.
+# Gateways connect here for registration, heartbeat, and policy sync.
+# ALB verifies client cert against the ACM PCA trust store and forwards
+# the verified identity in X-Amzn-Mtls-Clientcert-Subject header.
+
+resource "aws_lb_listener" "gateway_mtls" {
+  count             = var.gateway_trust_store_arn != "" ? 1 : 0
+  load_balancer_arn = aws_lb.mgmt.arn
+  port              = 9443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.acm_certificate_arn
+
+  mutual_authentication {
+    mode            = "verify"
+    trust_store_arn = var.gateway_trust_store_arn
+  }
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.mgmt.arn
   }
 }
 
