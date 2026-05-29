@@ -64,6 +64,12 @@ func (h *GatewayHandler) Register(c *gin.Context) {
 
 	h.registry.Register(&req)
 
+	// When a gateway authenticates via mTLS it already has a valid ACM PCA cert.
+	// Mark mtls_issued so the web UI shows the mTLS badge immediately.
+	if authMethod == "mtls" {
+		h.registry.MarkMTLSIssued(req.ID, time.Now().AddDate(1, 0, 0))
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":      "registered",
 		"gateway_id":  req.ID,
