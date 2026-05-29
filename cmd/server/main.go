@@ -541,7 +541,15 @@ func main() {
 	}
 
 	// ── Start mTLS server for gateway-to-mgmt-plane communication ──
-	go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
+	// Skipped in demo/cloud mode — Railway only exposes one port.
+	// Gateways authenticate via GATEWAY_API_KEY over the shared gRPC+HTTP port.
+	// Enable in production by setting MTLS_ENABLED=true with a dedicated port.
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
+		logger.Info("mTLS server enabled", zap.String("addr", envOrDefault("MTLS_LISTEN_ADDR", ":9443")))
+	} else {
+		logger.Info("mTLS server disabled (set MTLS_ENABLED=true to enable)")
+	}
 
 	// ── Multiplex gRPC + HTTP on a single port (Railway only exposes one port) ──
 	// gRPC requests carry "Content-Type: application/grpc" — cmux routes them
