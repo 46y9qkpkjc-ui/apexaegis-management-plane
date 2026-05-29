@@ -233,7 +233,9 @@ resource "aws_lb_listener" "https" {
   dynamic "mutual_authentication" {
     for_each = var.gateway_trust_store_arn != "" ? [1] : []
     content {
-      mode            = "passthrough"    # ALB validates cert; passes header to backend
+      # "verify" = ALB validates the client cert against the trust store CA.
+      # Verified cert subject is forwarded in X-Amzn-Mtls-Clientcert-Subject header.
+      mode            = "verify"
       trust_store_arn = var.gateway_trust_store_arn
     }
   }
