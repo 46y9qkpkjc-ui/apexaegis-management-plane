@@ -102,6 +102,14 @@ func main() {
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
 
+	// ── Gateway registry persistence ──
+	gwStore := db.NewGatewayStore(dbConn)
+	gwRegistry.SetStore(gwStore)
+	if err := gwRegistry.LoadFromDB(ctx); err != nil {
+		logger.Warn("Failed to restore gateway registry from DB (starting fresh)", zap.Error(err))
+	}
+	go gwRegistry.StartCleanupLoop(ctx)
+
 	// ── Auth store (user authentication + JWT) ──
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
