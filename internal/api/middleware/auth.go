@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -54,12 +55,53 @@ type gatewayRegistry interface {
 	ValidateAPIKey(apiKey string) (string, bool)
 }
 
-// GatewayAuth validates requests from gateways using their API key.
+// GatewayAuth validates requests from gateways.
+//
+// Priority order:
+//  1. ALB mTLS header (X-Amzn-Mtls-Clientcert-Subject) — when GATEWAY_MTLS_ENABLED=true.
+//     ALB has already verified the client cert against the ACM PCA trust store.
+//     The gateway identity is extracted from the cert's CN field.
+//  2. X-Gateway-Key / Bearer token — legacy API key auth (used before mTLS is provisioned).
 func GatewayAuth(registry gatewayRegistry) gin.HandlerFunc {
+	mtlsEnabled := os.Getenv("GATEWAY_MTLS_ENABLED") == "true"
+
 	return func(c *gin.Context) {
+		// Dev mode shortcut
+		if os.Getenv("DEPLOY_MODE") == "dev" {
+			apiKey := c.GetHeader("X-Gateway-Key")
+			if apiKey == "dev-gateway-key" {
+				c.Set("gateway_id", "dev-gateway")
+				c.Set("gateway_auth_method", "api_key")
+				c.Next()
+				return
+			}
+		}
+
+		// ── Path 1: ALB mTLS ─────────────────────────────────────────────
+		// ALB sets X-Amzn-Mtls-Clientcert-Subject after validating the cert.
+		// Format: "CN=ap-southeast-1,O=ApexAegis,OU=Gateway,C=SG"
+		if mtlsEnabled {
+			subjectHeader := c.GetHeader("X-Amzn-Mtls-Clientcert-Subject")
+			if subjectHeader != "" {
+				// URL-decode (ALB percent-encodes special chars)
+				decoded, err := url.QueryUnescape(subjectHeader)
+				if err != nil {
+					decoded = subjectHeader
+				}
+				// Extract CN= field — that is the gateway ID (e.g. ap-southeast-1)
+				gatewayID := extractCN(decoded)
+				if gatewayID != "" {
+					c.Set("gateway_id", gatewayID)
+					c.Set("gateway_auth_method", "mtls")
+					c.Next()
+					return
+				}
+			}
+		}
+
+		// ── Path 2: API key ──────────────────────────────────────────────
 		apiKey := c.GetHeader("X-Gateway-Key")
 		if apiKey == "" {
-			// Also accept Bearer token for backwards compat
 			auth := c.GetHeader("Authorization")
 			if strings.HasPrefix(auth, bearerPrefix) {
 				apiKey = strings.TrimPrefix(auth, bearerPrefix)
@@ -71,13 +113,6 @@ func GatewayAuth(registry gatewayRegistry) gin.HandlerFunc {
 			return
 		}
 
-		// Dev mode only: accept static dev key
-		if apiKey == "dev-gateway-key" && os.Getenv("DEPLOY_MODE") == "dev" {
-			c.Set("gateway_id", "dev-gateway")
-			c.Next()
-			return
-		}
-
 		gatewayID, ok := registry.ValidateAPIKey(apiKey)
 		if !ok {
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
@@ -85,8 +120,20 @@ func GatewayAuth(registry gatewayRegistry) gin.HandlerFunc {
 		}
 
 		c.Set("gateway_id", gatewayID)
+		c.Set("gateway_auth_method", "api_key")
 		c.Next()
 	}
+}
+
+// extractCN parses "CN=ap-southeast-1,O=ApexAegis,..." and returns the CN value.
+func extractCN(subject string) string {
+	for _, part := range strings.Split(subject, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "CN=") {
+			return strings.TrimPrefix(part, "CN=")
+		}
+	}
+	return ""
 }
 
 // tokenValidator is a minimal interface for validating access tokens.

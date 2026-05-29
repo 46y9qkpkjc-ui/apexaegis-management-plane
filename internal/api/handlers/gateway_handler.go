@@ -48,12 +48,27 @@ func (h *GatewayHandler) Register(c *gin.Context) {
 		return
 	}
 
+	// When mTLS is active, the authoritative gateway ID comes from the verified
+	// certificate CN (set by GatewayAuth middleware), not the request body.
+	// This prevents a gateway from registering under a spoofed ID.
+	authMethod, _ := c.Get("gateway_auth_method")
+	if authMethod == "mtls" {
+		if certGatewayID, ok := c.Get("gateway_id"); ok && certGatewayID != "" {
+			req.ID = certGatewayID.(string)
+			// Also override Region to match cert CN
+			if req.Region == "" {
+				req.Region = req.ID
+			}
+		}
+	}
+
 	h.registry.Register(&req)
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":     "registered",
-		"gateway_id": req.ID,
-		"timestamp":  time.Now().UTC(),
+		"status":      "registered",
+		"gateway_id":  req.ID,
+		"auth_method": authMethod,
+		"timestamp":   time.Now().UTC(),
 	})
 }
 
