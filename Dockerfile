@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY proto/ proto/
 RUN go mod download
 COPY . .
 # Static, lean build
