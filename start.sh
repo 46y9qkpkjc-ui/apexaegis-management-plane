@@ -16,14 +16,9 @@ fi
 # Ensure LISTEN_ADDR uses PORT if provided (Railway sets PORT)
 export LISTEN_ADDR="${LISTEN_ADDR:-:${PORT:-8080}}"
 
-echo "Starting management-plane: will run migrations then start server"
+echo "Starting management-plane..."
+echo "  LISTEN_ADDR: $LISTEN_ADDR"
+echo "  DEPLOY_MODE: ${DEPLOY_MODE:-cloud}"
 
-# Run migrations (idempotent)
-if [[ -x "/usr/local/bin/migrate-db.sh" ]]; then
-  /usr/local/bin/migrate-db.sh || {
-    echo "Migration failed" >&2
-    exit 1
-  }
-fi
-
+# Migrations run automatically inside the binary via dbConn.Migrate() on startup
 exec /usr/local/bin/management-plane
