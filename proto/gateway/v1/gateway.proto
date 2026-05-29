@@ -1,3 +1,4 @@
+
 syntax = "proto3";
 
 package apexaegis.gateway.v1;
@@ -6,9 +7,252 @@ option go_package = "github.com/apexaegis/proto/gateway/v1;gatewayv1";
 
 import "google/protobuf/timestamp.proto";
 
+// ═══════════════════════════════════════════════════════════════════════════
+// GatewayControl — bidirectional gRPC service for management-plane ↔ gateway
+// communication. Replaces WebSocket push + HTTP polling + HTTP registration.
+//
+// All connections are mTLS-authenticated: each gateway presents its machine
+// certificate issued by the management plane's internal CA.
+// ═══════════════════════════════════════════════════════════════════════════
+
 service GatewayControl {
+  // Register — gateway announces itself and receives its initial configuration.
+  // Called once at startup (and on reconnect).
   rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Heartbeat — gateway sends periodic health/telemetry data.
+  // Management plane responds with the current policy version so the gateway
+  // knows if it needs to pull an update.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // SyncPolicies — gateway pulls the full policy set (or diff since a version).
+  rpc SyncPolicies(SyncPoliciesRequest) returns (SyncPoliciesResponse);
+
+  // PolicyStream — server-streaming RPC. Management plane pushes policy update
+  // notifications to the gateway in real time. Replaces WebSocket push.
+  // The gateway keeps this stream open; on disconnect it falls back to
+  // periodic SyncPolicies calls.
+  rpc PolicyStream(PolicyStreamRequest) returns (stream PolicyEvent);
+
+  // ReportTelemetry — client-streaming RPC. Gateway streams telemetry events
+  // (connection counts, PEP verdicts, latency, errors) to the management plane.
+  rpc ReportTelemetry(stream TelemetryEvent) returns (TelemetryAck);
+
+  // IssueCertificate — gateway requests an mTLS certificate from the CA.
+  rpc IssueCertificate(CertRequest) returns (CertResponse);
 }
 
-message RegisterRequest { string gateway_id = 1; string name = 3; }
-message RegisterResponse { bool accepted = 1; int64 policy_version = 2; }
+// ═══════════════════════════════════════════════════════════════════════════
+// REGISTRATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+message RegisterRequest {
+  string gateway_id      = 1;
+  string region          = 2;
+  string name            = 3;
+  string location        = 4;
+  string country         = 5;
+  string provider        = 6;
+  string public_host     = 7;
+  string quic_endpoint   = 8;
+  string tls_endpoint    = 9;
+  string ping_endpoint   = 10;
+  string version         = 11;
+  string deploy_mode     = 12; // cloud, on_prem, hybrid
+  map<string, string> metadata = 13;
+}
+
+message RegisterResponse {
+  bool   accepted        = 1;
+  int64  policy_version  = 2;  // current version so gateway can decide to sync
+  string message         = 3;
+  // mTLS cert if auto-provisioned on first register
+  bytes  mtls_cert_pem   = 4;
+  bytes  mtls_key_pem    = 5;
+  bytes  ca_cert_pem     = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HEARTBEAT & TELEMETRY
+// ═══════════════════════════════════════════════════════════════════════════
+
+message HeartbeatRequest {
+  string gateway_id            = 1;
+  int64  policy_version        = 2;
+  int64  active_connections    = 3;
+  string status                = 4;  // online, degraded, draining
+  google.protobuf.Timestamp ts = 5;
+  ResourceMetrics metrics      = 6;
+}
+
+message ResourceMetrics {
+  double cpu_percent     = 1;
+  double memory_percent  = 2;
+  int64  goroutines      = 3;
+  int64  open_fds        = 4;
+  double bandwidth_mbps  = 5;
+}
+
+message HeartbeatResponse {
+  bool   acknowledged          = 1;
+  int64  current_policy_version = 2;
+  bool   force_sync            = 3; // management plane tells gateway to re-pull
+  string command               = 4; // drain, upgrade, restart, none
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POLICY SYNC
+// ═══════════════════════════════════════════════════════════════════════════
+
+message SyncPoliciesRequest {
+  string gateway_id     = 1;
+  int64  since_version  = 2; // 0 = full sync, >0 = diff since that version
+}
+
+message SyncPoliciesResponse {
+  int64  version        = 1;
+  bool   full_sync      = 2; // true if this is the complete policy set
+  repeated SecurityPolicy policies = 3;
+}
+
+message SecurityPolicy {
+  string id              = 1;
+  string org_id          = 2;
+  string name            = 3;
+  int32  sequence        = 4;
+  bool   enabled         = 5;
+
+  // Match criteria
+  repeated string traffic_steering    = 6;
+  repeated string access_methods      = 7;
+  repeated string source_users        = 8;
+  repeated string source_user_groups  = 9;
+  repeated string source_devices      = 10;
+  repeated string source_device_groups = 11;
+  repeated AddressObject source_addresses = 12;
+  bool   source_ip_negate             = 13;
+  repeated AddressObject dest_addresses    = 14;
+  repeated CloudApp dest_cloud_apps        = 15;
+  repeated string dest_url_categories      = 16;
+  bool   dest_ip_negate               = 17;
+  repeated ServiceObject services     = 18;
+  repeated string http_methods        = 19;
+  repeated string crud_operations     = 20;
+
+  // Actions
+  string action                = 21;
+  string forward_proxy_address = 22;
+  int32  forward_proxy_port    = 23;
+
+  // Security profiles
+  SSLProfile ssl_profile         = 24;
+  repeated ATPProfile atp_profiles = 25;
+
+  // DNS filtering
+  bool   dns_filter_enabled      = 26;
+  repeated string dns_block_categories = 27;
+  repeated string dns_allow_categories = 28;
+  repeated string dns_custom_blocklist = 29;
+  repeated string dns_custom_allowlist = 30;
+  bool   dns_safe_search         = 31;
+
+  // Web filtering
+  bool   web_filter_enabled      = 32;
+  repeated string web_block_categories = 33;
+  repeated string web_allow_categories = 34;
+  repeated string web_custom_blocklist = 35;
+  repeated string web_custom_allowlist = 36;
+  bool   web_safe_search         = 37;
+  bool   web_block_uncategorized = 38;
+
+  // Cloud tenant restrictions
+  bool   cloud_tenant_restrict   = 39;
+  repeated string cloud_allowed_tenants = 40;
+
+  // Logging
+  bool   log_traffic             = 41;
+  bool   log_security_events     = 42;
+}
+
+message AddressObject {
+  string type  = 1; // ipv4, ipv6, ip_range, fqdn, domain, subnet
+  string value = 2;
+}
+
+message CloudApp {
+  string id              = 1;
+  string name            = 2;
+  repeated string domains = 3;
+  bool   tenant_aware    = 4;
+  string tenant_header   = 5;
+}
+
+message ServiceObject {
+  string protocol   = 1;
+  string port_range = 2;
+}
+
+message SSLProfile {
+  string mode            = 1; // certificate_inspection, full_inspection
+  bytes  ca_cert_pem     = 2;
+  bytes  ca_key_pem      = 3;
+  string min_tls_version = 4;
+}
+
+message ATPProfile {
+  string type             = 1;
+  string action_critical  = 2;
+  string action_high      = 3;
+  string action_medium    = 4;
+  string action_low       = 5;
+  bytes  config           = 6; // JSON-encoded extra config
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POLICY STREAM (server-streaming push)
+// ═══════════════════════════════════════════════════════════════════════════
+
+message PolicyStreamRequest {
+  string gateway_id     = 1;
+  int64  current_version = 2;
+}
+
+message PolicyEvent {
+  string type               = 1; // policy_update, force_sync, heartbeat
+  int64  version            = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TELEMETRY (client-streaming)
+// ═══════════════════════════════════════════════════════════════════════════
+
+message TelemetryEvent {
+  string gateway_id = 1;
+  string event_type = 2; // pep_verdict, connection, dns_query, error
+  google.protobuf.Timestamp timestamp = 3;
+  map<string, string> labels = 4;
+  double value      = 5;
+  string detail     = 6; // JSON-encoded extra detail
+}
+
+message TelemetryAck {
+  int64  events_received = 1;
+  bool   acknowledged    = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CERTIFICATE ISSUANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+message CertRequest {
+  string gateway_id = 1;
+  bytes  csr_pem    = 2; // PKCS#10 CSR
+}
+
+message CertResponse {
+  bytes  cert_pem    = 1;
+  bytes  ca_cert_pem = 2;
+  google.protobuf.Timestamp not_after = 3;
+}
+
