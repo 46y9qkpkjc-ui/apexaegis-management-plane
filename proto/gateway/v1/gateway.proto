@@ -3,7 +3,7 @@ syntax = "proto3";
 
 package apexaegis.gateway.v1;
 
-option go_package = "github.com/apexaegis/proto/gateway/v1;gatewayv1";
+option go_package = "github.com/apexaegis/proto/gateway/v1/gen;gatewayv1";
 
 import "google/protobuf/timestamp.proto";
 
