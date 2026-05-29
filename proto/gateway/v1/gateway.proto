@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package apexaegis.gateway.v1;
+
+option go_package = "github.com/apexaegis/proto/gateway/v1;gatewayv1";
+
+import "google/protobuf/timestamp.proto";
+
+service GatewayControl {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+message RegisterRequest { string gateway_id = 1; string name = 3; }
+message RegisterResponse { bool accepted = 1; int64 policy_version = 2; }

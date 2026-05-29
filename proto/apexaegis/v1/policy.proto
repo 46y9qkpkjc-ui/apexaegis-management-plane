@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package apexaegis.v1;
+
+option go_package = "github.com/apexaegis/proto/apexaegis/v1";
+option java_multiple_files = true;
+option java_package = "com.apexaegis.api.v1";
+option java_outer_classname = "PolicyProto";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service PolicyService {
+  rpc PushPolicy(Policy) returns (PolicyAcknoledgement);
+  rpc GetPolicies(GetPoliciesRequest) returns (GetPoliciesResponse);
+}
+
+message Policy {
+  string id = 1;
+  string name = 2;
+}
+
+message PolicyAcknoledgement { string policy_id = 1; bool success = 2; }
+
+message GetPoliciesRequest { string gateway_id = 1; }
+message GetPoliciesResponse { repeated Policy policies = 1; }
