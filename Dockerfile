@@ -2,10 +2,13 @@
 # Uses the buildkit provided TARGETARCH to cross-build for the current platform.
 
 ARG TARGETARCH
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26 AS builder
 ARG TARGETARCH
 ENV GOARCH=${TARGETARCH:-amd64}
-RUN apk add --no-cache git build-base
+# Install git and build tools on Debian-based image
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
