@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/soheilhy/cmux"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -540,55 +543,58 @@ func main() {
 	// ── Start mTLS server for gateway-to-mgmt-plane communication ──
 	go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
 
-	// ── Start gRPC control-plane server (replaces WebSocket push) ──
+	// ── Multiplex gRPC + HTTP on a single port (Railway only exposes one port) ──
+	// gRPC requests carry "Content-Type: application/grpc" — cmux routes them
+	// to the gRPC server; everything else goes to the Gin HTTP handler.
+	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
+	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
+
+	logger.Info("Starting multiplexed gRPC+HTTP listener",
+		zap.String("addr", listenAddr),
+		zap.String("deploy_mode", deployMode),
+	)
+
+	lis, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		logger.Fatal("Failed to bind listener", zap.Error(err))
+	}
+
+	mux := cmux.New(lis)
+	grpcLis := mux.MatchWithWriters(
+		cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"),
+	)
+	httpLis := mux.Match(cmux.Any())
+
+	// gRPC server
 	grpcSrv := grpcserver.NewServer(grpcserver.Config{
-		ListenAddr: envOrDefault("GRPC_LISTEN_ADDR", ":9444"),
-		CertFile:   envOrDefault("GRPC_CERT_FILE", caCertFile),
-		KeyFile:    envOrDefault("GRPC_KEY_FILE", caKeyFile),
-		CACertFile: caCertFile,
-		DevMode:    envOrDefault("DEPLOY_MODE", "cloud") == "dev",
+		DevMode: deployMode == "dev",
 	}, grpcserver.Deps{
 		PolicyStore: policyStore,
 		Registry:    gwRegistry,
 		Logger:      logger,
 	})
 	go func() {
-		if err := grpcSrv.ListenAndServe(ctx); err != nil {
+		if err := grpcSrv.ServeListener(ctx, grpcLis); err != nil {
 			logger.Error("gRPC server error", zap.Error(err))
 		}
 	}()
 
-	// ── Start main HTTP API server ──
-	// The management plane is a cloud-hosted service (api.apexaegis.io).
-	// It is NOT a local proxy. Desktop/mobile clients connect to this API
-	// over the internet for gateway discovery, policy fetch, and admin ops.
-	// Only P2P mesh nodes with local PEP/PDP provision run a local management
-	// plane instance — that is handled by the desktop client's embedded PEP/PDP.
-	listenAddr := envOrDefault("LISTEN_ADDR", ":9090")
-	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
-
-	if deployMode == "cloud" {
-		logger.Info("Management plane running in CLOUD mode — not a local proxy",
-			zap.String("addr", listenAddr),
-			zap.String("deploy_mode", deployMode),
-		)
-	} else {
-		logger.Info("Management plane running in local/dev mode",
-			zap.String("addr", listenAddr),
-			zap.String("deploy_mode", deployMode),
-		)
-	}
-
+	// HTTP server
 	server := &http.Server{
-		Addr:              listenAddr,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
 	go func() {
-		logger.Info("Management plane API server starting", zap.String("addr", listenAddr))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("API server error", zap.Error(err))
+		logger.Info("Management plane HTTP server starting", zap.String("addr", listenAddr))
+		if err := server.Serve(httpLis); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("HTTP server error", zap.Error(err))
+		}
+	}()
+
+	// Start cmux dispatcher
+	go func() {
+		if err := mux.Serve(); err != nil {
+			logger.Error("cmux error", zap.Error(err))
 		}
 	}()
 

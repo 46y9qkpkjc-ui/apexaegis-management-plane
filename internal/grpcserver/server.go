@@ -71,13 +71,17 @@ func NewServer(cfg Config, deps Deps) *Server {
 	}
 }
 
-// ListenAndServe starts the gRPC server. Blocks until context is cancelled.
+// ListenAndServe starts the gRPC server on its own listener. Blocks until context is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	lis, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("grpc listen: %w", err)
 	}
+	return s.ServeListener(ctx, lis)
+}
 
+// ServeListener starts the gRPC server on a pre-created listener (used with cmux).
+func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	opts := []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    20 * time.Second,
@@ -110,7 +114,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		grpcServer.GracefulStop()
 	}()
 
-	s.logger.Info("gRPC server listening", zap.String("addr", s.cfg.ListenAddr))
+	s.logger.Info("gRPC server listening via cmux")
 	return grpcServer.Serve(lis)
 }
 
