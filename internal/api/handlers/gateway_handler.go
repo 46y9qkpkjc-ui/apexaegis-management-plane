@@ -225,3 +225,11 @@ func (h *GatewayHandler) GetPolicyVersion(c *gin.Context) {
 		"version": h.policyStore.Version(),
 	})
 }
+
+// ListAvailableGateways returns all online/available gateways for desktop-client discovery.
+// This is the public endpoint that clients use to fetch the gateway list.
+func (h *GatewayHandler) ListAvailableGateways(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"gateways": h.registry.ListAvailable(),
+	})
+}

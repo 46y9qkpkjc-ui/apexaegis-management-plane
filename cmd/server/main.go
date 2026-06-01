@@ -333,6 +333,13 @@ func main() {
 		gwAPI.GET("/policies/ws", wsHub.HandleSubscribe)
 	}
 
+	// Public Gateway Discovery API (for desktop-client to discover available gateways)
+	publicGWAPI := router.Group("/api/v1/gateways")
+	{
+		gwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
+		publicGWAPI.GET("/available", gwHandler.ListAvailableGateways)
+	}
+
 	// P2P Mesh API (authenticated by client JWT)
 	meshAPI := router.Group("/api/v1/mesh")
 	meshAPI.Use(middleware.JWTAuth(authStore))

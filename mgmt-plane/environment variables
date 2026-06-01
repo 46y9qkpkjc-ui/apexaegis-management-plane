@@ -1,0 +1,12 @@
+ecr_repository_url = "184353710603.dkr.ecr.ap-southeast-1.amazonaws.com/apexaegis-gateway"
+singapore_ip = "52.76.208.21"
+sydney_ip = "54.253.141.170"
+
+
+ecr_repository_url = "184353710603.dkr.ecr.ap-southeast-1.amazonaws.com/apexaegis-gateway"
+instance_profile_name = "apexaegis-gateway-instance-profile"
+
+alb_dns_name = "apexaegis-mgmt-344150757.ap-southeast-1.elb.amazonaws.com"
+ecr_repository_url = "184353710603.dkr.ecr.ap-southeast-1.amazonaws.com/apexaegis-mgmt-plane"
+ecs_cluster_name = "apexaegis-mgmt"
+ecs_service_name = "apexaegis-mgmt-plane"
