@@ -5,7 +5,7 @@ set -euo pipefail
 
 ACCOUNT_ID="184353710603"
 REGION="ap-southeast-1"
-IMAGE_NAME="apexaegis-mgmt-plane"
+ECR_REPO="apexaegis-mgmt-plane"  # Correct ECR repository name (NOT apexaegis/management-plane)
 IMAGE_TAG="phase2"
 
 echo "🚀 Phase 2: Building Multiarch Docker Image"
@@ -13,7 +13,8 @@ echo "==========================================="
 echo ""
 echo "Account ID: $ACCOUNT_ID"
 echo "Region: $REGION"
-echo "Image: ${IMAGE_NAME}:${IMAGE_TAG}"
+echo "Repository: $ECR_REPO"
+echo "Image: ${ECR_REPO}:${IMAGE_TAG}"
 echo ""
 
 # Step 1: ECR Login
@@ -33,8 +34,8 @@ cd "$(dirname "$0")/.."
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -f Dockerfile \
-  -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${IMAGE_NAME}:${IMAGE_TAG} \
-  -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${IMAGE_NAME}:latest \
+  -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG} \
+  -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest \
   --push \
   .
 
@@ -42,10 +43,8 @@ echo ""
 echo "✅ Image pushed successfully!"
 echo ""
 echo "📝 Next steps:"
-echo "1. Update apexaegis-management-plane/mgmt-plane/terraform.tfvars:"
-echo "   image_tag = \"${IMAGE_TAG}\""
-echo ""
-echo "2. Apply Terraform:"
-echo "   cd apexaegis-management-plane/mgmt-plane"
+echo "1. Apply Terraform (image_tag already set in terraform.tfvars):"
+echo "   cd ../mgmt-plane"
+echo "   terraform plan"
 echo "   terraform apply"
 echo ""
