@@ -340,6 +340,14 @@ func main() {
 		publicGWAPI.GET("/available", gwHandler.ListAvailableGateways)
 	}
 
+	// Agent Configuration API (for desktop-client to fetch split tunnel policies)
+	// No authentication required (policies are non-sensitive configuration)
+	agentAPI := router.Group("/api/v1/agent")
+	{
+		agentHandler := handlers.NewAgentHandler(policyStore, logger)
+		agentAPI.GET("/policies", agentHandler.GetPolicies)
+	}
+
 	// P2P Mesh API (authenticated by client JWT)
 	meshAPI := router.Group("/api/v1/mesh")
 	meshAPI.Use(middleware.JWTAuth(authStore))
