@@ -379,6 +379,9 @@ resource "aws_lb_listener" "https" {
   # Gateway authentication on this shared endpoint is handled in the app using
   # X-Gateway-Key/Bearer auth. Use a separate gateway-only 443 hostname/listener
   # or NLB TLS passthrough if strict gateway mTLS is required later.
+  mutual_authentication {
+    mode = "off"
+  }
 
   default_action {
     type             = "forward"

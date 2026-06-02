@@ -26,28 +26,28 @@ type DeviceRegistration struct {
 
 // DeviceInventoryItem is the admin-facing inventory row for mTLS registered devices.
 type DeviceInventoryItem struct {
-	ID                    string     `json:"id"`
-	OrgID                 string     `json:"org_id"`
-	DeviceID              string     `json:"device_id"`
-	DeviceName            string     `json:"device_name"`
-	DeviceType            string     `json:"device_type"`
-	OSType                string     `json:"os_type"`
-	OSVersion             string     `json:"os_version"`
-	ClientVersion         string     `json:"client_version"`
-	UserID                string     `json:"user_id,omitempty"`
-	UserName              string     `json:"user_name,omitempty"`
-	UserEmail             string     `json:"user_email,omitempty"`
-	ComplianceStatus      string     `json:"compliance_status"`
-	Status                string     `json:"status"`
-	RegisteredVia         string     `json:"registered_via"`
-	MTLSCertSubject       string     `json:"mtls_cert_subject,omitempty"`
-	MTLSCertSerial        string     `json:"mtls_cert_serial,omitempty"`
-	MTLSCertFingerprint   string     `json:"mtls_cert_fingerprint_sha256,omitempty"`
-	MTLSCertNotAfter      *time.Time `json:"mtls_cert_not_after,omitempty"`
-	LastIP                string     `json:"last_ip,omitempty"`
-	LastSeen              *time.Time `json:"last_seen,omitempty"`
-	CreatedAt             *time.Time `json:"created_at,omitempty"`
-	UpdatedAt             *time.Time `json:"updated_at,omitempty"`
+	ID                  string     `json:"id"`
+	OrgID               string     `json:"org_id"`
+	DeviceID            string     `json:"device_id"`
+	DeviceName          string     `json:"device_name"`
+	DeviceType          string     `json:"device_type"`
+	OSType              string     `json:"os_type"`
+	OSVersion           string     `json:"os_version"`
+	ClientVersion       string     `json:"client_version"`
+	UserID              string     `json:"user_id,omitempty"`
+	UserName            string     `json:"user_name,omitempty"`
+	UserEmail           string     `json:"user_email,omitempty"`
+	ComplianceStatus    string     `json:"compliance_status"`
+	Status              string     `json:"status"`
+	RegisteredVia       string     `json:"registered_via"`
+	MTLSCertSubject     string     `json:"mtls_cert_subject,omitempty"`
+	MTLSCertSerial      string     `json:"mtls_cert_serial,omitempty"`
+	MTLSCertFingerprint string     `json:"mtls_cert_fingerprint_sha256,omitempty"`
+	MTLSCertNotAfter    *time.Time `json:"mtls_cert_not_after,omitempty"`
+	LastIP              string     `json:"last_ip,omitempty"`
+	LastSeen            *time.Time `json:"last_seen,omitempty"`
+	CreatedAt           *time.Time `json:"created_at,omitempty"`
+	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
 }
 
 // DeploymentInfo contains organization deployment and device-license usage.

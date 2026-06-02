@@ -9,10 +9,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type deviceStore interface {
-	ListDevices(ctx gin.Context, orgID, search string, limit int) ([]db.DeviceInventoryItem, error)
-}
-
 type DeviceHandler struct {
 	store  *db.DeviceStore
 	logger *zap.Logger
