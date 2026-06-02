@@ -101,6 +101,7 @@ func main() {
 
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
+	tokenStore := db.NewTokenStore(dbConn, logger)
 
 	// ── Gateway registry persistence ──
 	gwStore := db.NewGatewayStore(dbConn)
@@ -385,6 +386,13 @@ func main() {
 		adminAPI.POST("/config/lock", adminHandler.AcquireConfigLock)
 		adminAPI.DELETE("/config/lock", adminHandler.ReleaseConfigLock)
 		adminAPI.GET("/config/lock", adminHandler.GetConfigLock)
+
+		// API Token Management (for desktop-client registration & license tracking)
+		tokenHandler := handlers.NewTokenHandler(tokenStore, logger)
+		adminAPI.POST("/tokens", tokenHandler.CreateToken)
+		adminAPI.GET("/tokens", tokenHandler.ListTokens)
+		adminAPI.DELETE("/tokens/:id", tokenHandler.RevokeToken)
+		adminAPI.GET("/organization/deployment-info", tokenHandler.GetDeploymentInfo)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
