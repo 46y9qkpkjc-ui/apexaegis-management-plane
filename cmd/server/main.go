@@ -291,6 +291,14 @@ func main() {
 		})
 	}
 
+	// Device Inventory API (admin-only — mTLS registered endpoint devices)
+	deviceAPI := router.Group("/api/v1/devices")
+	deviceAPI.Use(middleware.JWTAuth(authStore))
+	{
+		deviceHandler := handlers.NewDeviceHandler(deviceStore, logger)
+		deviceAPI.GET("", deviceHandler.ListDevices)
+	}
+
 	// SCIM 2.0 provisioning API (RFC 7644 — bearer token auth from IdPs)
 	scimAPI := router.Group("/scim/v2")
 	scimAPI.Use(middleware.SCIMAuth(scimStore))

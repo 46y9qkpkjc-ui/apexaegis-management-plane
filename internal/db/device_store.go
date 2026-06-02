@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -21,6 +22,32 @@ type DeviceRegistration struct {
 	CertSerial            string
 	CertFingerprintSHA256 string
 	CertNotAfter          time.Time
+}
+
+// DeviceInventoryItem is the admin-facing inventory row for mTLS registered devices.
+type DeviceInventoryItem struct {
+	ID                    string     `json:"id"`
+	OrgID                 string     `json:"org_id"`
+	DeviceID              string     `json:"device_id"`
+	DeviceName            string     `json:"device_name"`
+	DeviceType            string     `json:"device_type"`
+	OSType                string     `json:"os_type"`
+	OSVersion             string     `json:"os_version"`
+	ClientVersion         string     `json:"client_version"`
+	UserID                string     `json:"user_id,omitempty"`
+	UserName              string     `json:"user_name,omitempty"`
+	UserEmail             string     `json:"user_email,omitempty"`
+	ComplianceStatus      string     `json:"compliance_status"`
+	Status                string     `json:"status"`
+	RegisteredVia         string     `json:"registered_via"`
+	MTLSCertSubject       string     `json:"mtls_cert_subject,omitempty"`
+	MTLSCertSerial        string     `json:"mtls_cert_serial,omitempty"`
+	MTLSCertFingerprint   string     `json:"mtls_cert_fingerprint_sha256,omitempty"`
+	MTLSCertNotAfter      *time.Time `json:"mtls_cert_not_after,omitempty"`
+	LastIP                string     `json:"last_ip,omitempty"`
+	LastSeen              *time.Time `json:"last_seen,omitempty"`
+	CreatedAt             *time.Time `json:"created_at,omitempty"`
+	UpdatedAt             *time.Time `json:"updated_at,omitempty"`
 }
 
 // DeploymentInfo contains organization deployment and device-license usage.
@@ -96,6 +123,70 @@ func (s *DeviceStore) GetDeploymentInfo(ctx context.Context, orgID string) (*Dep
 	info.TenantID = info.OrgID
 	info.LicensesAvailable = info.SubscriptionLicenses - info.LicensesConsumed
 	return &info, nil
+}
+
+// ListDevices returns active and historical device registrations for an organization.
+func (s *DeviceStore) ListDevices(ctx context.Context, orgID, search string, limit int) ([]DeviceInventoryItem, error) {
+	if orgID == "" {
+		return nil, errors.New("orgID is required")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+
+	args := []interface{}{orgID, limit}
+	where := `WHERE d.org_id = $1`
+	if strings.TrimSpace(search) != "" {
+		args = append(args, "%"+strings.TrimSpace(search)+"%")
+		where += fmt.Sprintf(` AND (
+			d.device_id ILIKE $%d OR d.device_name ILIKE $%d OR
+			d.os_type ILIKE $%d OR u.email ILIKE $%d OR u.name ILIKE $%d
+		)`, len(args), len(args), len(args), len(args), len(args))
+	}
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT d.id::STRING, d.org_id::STRING, d.device_id,
+		       COALESCE(d.device_name, ''), COALESCE(d.device_type, ''),
+		       COALESCE(d.os_type, ''), COALESCE(d.os_version, ''),
+		       COALESCE(d.client_version, ''),
+		       COALESCE(d.user_id::STRING, ''), COALESCE(u.name, ''),
+		       COALESCE(u.email, ''), COALESCE(d.compliance_status, 'unknown'),
+		       COALESCE(d.status, 'unknown'), COALESCE(d.registered_via, ''),
+		       COALESCE(d.mtls_cert_subject, ''), COALESCE(d.mtls_cert_serial, ''),
+		       COALESCE(d.mtls_cert_fingerprint_sha256, ''),
+		       d.mtls_cert_not_after, COALESCE(d.last_ip::STRING, ''),
+		       d.last_seen, d.created_at, d.updated_at
+		  FROM system_mgmt.devices d
+		  LEFT JOIN system_mgmt.users u ON u.id = d.user_id
+		  %s
+		 ORDER BY d.last_seen DESC NULLS LAST, d.created_at DESC
+		 LIMIT $2
+	`, where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list devices: %w", err)
+	}
+	defer rows.Close()
+
+	devices := []DeviceInventoryItem{}
+	for rows.Next() {
+		var item DeviceInventoryItem
+		if err := rows.Scan(
+			&item.ID, &item.OrgID, &item.DeviceID, &item.DeviceName,
+			&item.DeviceType, &item.OSType, &item.OSVersion, &item.ClientVersion,
+			&item.UserID, &item.UserName, &item.UserEmail,
+			&item.ComplianceStatus, &item.Status, &item.RegisteredVia,
+			&item.MTLSCertSubject, &item.MTLSCertSerial, &item.MTLSCertFingerprint,
+			&item.MTLSCertNotAfter, &item.LastIP, &item.LastSeen,
+			&item.CreatedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		devices = append(devices, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate devices: %w", err)
+	}
+	return devices, nil
 }
 
 // RegisterMTLSDevice upserts a device from a verified client certificate.
