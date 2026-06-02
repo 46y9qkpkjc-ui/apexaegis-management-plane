@@ -31,6 +31,7 @@ import (
 	"github.com/zcp/management-plane/internal/sdn"
 	"github.com/zcp/management-plane/internal/security"
 	"github.com/zcp/management-plane/internal/segment"
+	"github.com/zcp/management-plane/internal/threat-intel"
 	"github.com/zcp/management-plane/internal/validation"
 	"github.com/zcp/management-plane/internal/websocket"
 )
@@ -558,6 +559,43 @@ func main() {
 		ccAdminAPI.GET("/audit-logs", clientConfigHandler.GetAuditLogs)
 		ccAdminAPI.POST("/validate", clientConfigHandler.ValidateConfig)
 	}
+
+	// ── DNS Threat Intelligence API (Phase 6 DNS Filtering) ──
+	// Threat intel sourced from: VirusTotal, AlienVault OTX, URLScan.io
+	threatStore := db.NewThreatStore(dbConn, logger)
+
+	// Initialize fetcher with API keys from environment
+	vtAPIKey := os.Getenv("VIRUSTOTAL_API_KEY")
+	if vtAPIKey == "" {
+		vtAPIKey = "331e2c7621ac99a5d844abd0ce56bd181ac1a08ae045c172af997f5f133d066c" // Demo key
+	}
+	otxAPIKey := os.Getenv("OTX_API_KEY")
+	// OTX requires LevelBlue USM integration, skip for now
+	urlscanAPIKey := os.Getenv("URLSCAN_API_KEY")
+	if urlscanAPIKey == "" {
+		urlscanAPIKey = "019e88fa-8670-7789-800f-a1de113bff53" // Demo key
+	}
+
+	threatFetcher := threat_intel.NewThreatFetcher(otxAPIKey, vtAPIKey, urlscanAPIKey, logger)
+	syncService := threat_intel.NewSyncService(threatStore, threatFetcher, logger)
+	syncService.Start(context.Background())
+
+	threatIntelHandler := handlers.NewThreatIntelHandler(threatStore, syncService, logger)
+	threatAPI := router.Group("/api/v1/admin/threat-intel")
+	threatAPI.Use(middleware.JWTAuth(authStore))
+	{
+		threatAPI.GET("/sources", threatIntelHandler.ListSources)
+		threatAPI.GET("/stats", threatIntelHandler.GetSourceStats)
+		threatAPI.POST("/sync", threatIntelHandler.ManualSync)
+		threatAPI.POST("/lookup", threatIntelHandler.LookupThreat)
+		threatAPI.POST("/cleanup", threatIntelHandler.EvictStale)
+	}
+
+	logger.Info("threat intelligence API initialized",
+		zap.Bool("virustotal_enabled", vtAPIKey != ""),
+		zap.Bool("otx_enabled", otxAPIKey != ""),
+		zap.Bool("urlscan_enabled", urlscanAPIKey != ""),
+	)
 
 	// Security Validation API (container-based test infrastructure)
 	validationAPI := router.Group("/api/v1/validation")
