@@ -110,6 +110,7 @@ func main() {
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
 	deviceStore := db.NewDeviceStore(dbConn, logger)
+	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
 
 	// ── Gateway registry persistence ──
 	gwStore := db.NewGatewayStore(dbConn)
@@ -348,21 +349,36 @@ func main() {
 		logger.Info("Legacy gateway REST API disabled; using gRPC gateway control")
 	}
 
-	// Public Gateway Discovery API (for desktop-client to discover available gateways)
+	// Device-authenticated Gateway Discovery API (desktop/mobile clients use device mTLS)
 	publicGWAPI := router.Group("/api/v1/gateways")
+	publicGWAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	{
 		gwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
 		publicGWAPI.GET("/available", gwHandler.ListAvailableGateways)
 	}
 
-	// Agent Configuration API (for desktop-client to fetch split tunnel policies)
-	// No authentication required (policies are non-sensitive configuration)
+	// Agent bootstrap endpoint. The handler itself validates device mTLS and tenant ID.
 	agentAPI := router.Group("/api/v1/agent")
 	{
-		agentHandler := handlers.NewAgentHandler(policyStore, logger)
 		agentAuthHandler := handlers.NewAgentAuthHandler(deviceStore, authStore, logger)
 		agentAPI.POST("/auth", agentAuthHandler.Authenticate)
-		agentAPI.GET("/policies", agentHandler.GetPolicies)
+	}
+
+	// Device-authenticated client runtime configuration endpoints.
+	deviceClientAPI := router.Group("/api/v1/client")
+	deviceClientAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, logger)
+		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
+		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
+	}
+
+	// Device-authenticated legacy agent policy endpoint.
+	agentPolicyAPI := router.Group("/api/v1/agent")
+	agentPolicyAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		agentHandler := handlers.NewAgentHandler(policyStore, logger)
+		agentPolicyAPI.GET("/policies", agentHandler.GetPolicies)
 	}
 
 	// P2P Mesh API (authenticated by client JWT)
@@ -516,12 +532,14 @@ func main() {
 	idAPI := router.Group("/api/v1/identity")
 	idAPI.Use(middleware.JWTAuth(authStore))
 	{
-		idHandler := handlers.NewIdentityBrokerHandler(idBroker, logger)
+		idHandler := handlers.NewIdentityBrokerHandler(idBroker, idpStore, logger)
 		idAPI.GET("/providers", idHandler.ListIdPs)
 		idAPI.GET("/providers/:id", idHandler.GetIdP)
 		idAPI.POST("/providers", idHandler.CreateIdP)
 		idAPI.PUT("/providers/:id", idHandler.UpdateIdP)
 		idAPI.DELETE("/providers/:id", idHandler.DeleteIdP)
+		idAPI.GET("/auth-profiles", idHandler.ListAuthProfiles)
+		idAPI.PUT("/auth-profiles", idHandler.UpdateAuthProfiles)
 		idAPI.POST("/token/exchange", idHandler.ExchangeToken)
 		idAPI.GET("/sessions", idHandler.ListSessions)
 		idAPI.GET("/sessions/:id", idHandler.GetSession)
@@ -564,7 +582,6 @@ func main() {
 	}
 
 	// Client Configuration API (Phase 6 Option B)
-	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
 	clientConfigHandler := handlers.NewClientConfigHandler(clientConfigStore, logger)
 	ccAdminAPI := router.Group("/api/v1/admin/client-config")
 	ccAdminAPI.Use(middleware.JWTAuth(authStore))

@@ -3,7 +3,10 @@ package middleware
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,7 +42,7 @@ func CORS() gin.HandlerFunc {
 		}
 		c.Header("Access-Control-Allow-Origin", origin)
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gateway-Key, X-Request-ID")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gateway-Key, X-Request-ID, X-ApexAegis-Tenant-ID, X-Tenant-ID")
 		c.Header("Access-Control-Allow-Credentials", "true")
 		c.Header("Access-Control-Max-Age", "86400")
 
@@ -188,6 +191,105 @@ func MTLSIdentity() gin.HandlerFunc {
 		c.Set("cert_serial", cert.SerialNumber.String())
 		c.Next()
 	}
+}
+
+// DeviceMTLSAuth requires a verified desktop/mobile device certificate.
+// It accepts either a direct TLS peer certificate or AWS ALB mTLS headers.
+// The ALB/NLB trust store is responsible for certificate chain verification.
+type deviceMTLSValidator interface {
+	ValidateMTLSDevice(ctx context.Context, orgID, fingerprint, serial string) (string, error)
+}
+
+func DeviceMTLSAuth(validator deviceMTLSValidator) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		identity := deviceCertificateIdentity(c.Request)
+		if identity == nil {
+			AbortWithSafeError(c, http.StatusUnauthorized, nil)
+			return
+		}
+
+		tenantID := strings.TrimSpace(c.GetHeader("X-ApexAegis-Tenant-ID"))
+		if tenantID == "" {
+			tenantID = strings.TrimSpace(c.GetHeader("X-Tenant-ID"))
+		}
+		if tenantID == "" {
+			AbortWithSafeError(c, http.StatusUnauthorized, nil)
+			return
+		}
+		if validator == nil {
+			AbortWithSafeError(c, http.StatusUnauthorized, nil)
+			return
+		}
+		deviceID, err := validator.ValidateMTLSDevice(c.Request.Context(), tenantID, identity.fingerprint, identity.serial)
+		if err != nil {
+			AbortWithSafeError(c, http.StatusUnauthorized, err)
+			return
+		}
+
+		c.Set("org_id", tenantID)
+		c.Set("device_id", deviceID)
+		c.Set("device_cert_subject", identity.subject)
+		c.Set("device_cert_serial", identity.serial)
+		c.Set("device_cert_fingerprint_sha256", identity.fingerprint)
+		c.Next()
+	}
+}
+
+type deviceMTLSIdentity struct {
+	subject     string
+	serial      string
+	fingerprint string
+}
+
+func deviceCertificateIdentity(req *http.Request) *deviceMTLSIdentity {
+	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
+		cert := req.TLS.PeerCertificates[0]
+		sum := sha256.Sum256(cert.Raw)
+		return &deviceMTLSIdentity{
+			subject:     cert.Subject.String(),
+			serial:      cert.SerialNumber.String(),
+			fingerprint: hex.EncodeToString(sum[:]),
+		}
+	}
+
+	subject := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Subject"))
+	serial := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Serial-Number"))
+	leaf := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	if subject == "" && serial == "" && leaf == "" {
+		return nil
+	}
+
+	fingerprint := strings.TrimSpace(req.Header.Get("X-Amzn-Mtls-Clientcert-Fingerprint"))
+	if leaf != "" {
+		sum := sha256.Sum256([]byte(leaf))
+		fingerprint = hex.EncodeToString(sum[:])
+		if block, _ := pem.Decode([]byte(leaf)); block != nil {
+			if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+				if subject == "" {
+					subject = cert.Subject.String()
+				}
+				if serial == "" {
+					serial = cert.SerialNumber.String()
+				}
+			}
+		}
+	}
+	if fingerprint == "" {
+		sum := sha256.Sum256([]byte(subject + "|" + serial))
+		fingerprint = hex.EncodeToString(sum[:])
+	}
+	return &deviceMTLSIdentity{subject: subject, serial: serial, fingerprint: fingerprint}
+}
+
+func decodeMTLSHeader(value string) string {
+	if value == "" {
+		return ""
+	}
+	decoded, err := url.QueryUnescape(value)
+	if err != nil {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(decoded)
 }
 
 // scimTokenValidator is a minimal interface for validating SCIM bearer tokens.

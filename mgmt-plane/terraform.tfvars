@@ -4,10 +4,14 @@
 aws_account_id = "184353710603"
 aws_region     = "ap-southeast-1"
 domain         = "api.apexaegis.app"
+gateway_domain = "gateway-api.apexaegis.app"
+device_domain  = "device-api.apexaegis.app"
 
 # Get this from AWS Certificate Manager after requesting a cert for api.apexaegis.app
 # Must be in ap-southeast-1 (same region as ALB)
-acm_certificate_arn = "arn:aws:acm:ap-southeast-1:184353710603:certificate/70faa022-0108-4102-abfc-676bb3b29fd6"
+acm_certificate_arn         = "arn:aws:acm:ap-southeast-1:184353710603:certificate/70faa022-0108-4102-abfc-676bb3b29fd6"
+gateway_acm_certificate_arn = "arn:aws:acm:ap-southeast-1:184353710603:certificate/70faa022-0108-4102-abfc-676bb3b29fd6"
+device_acm_certificate_arn  = "arn:aws:acm:ap-southeast-1:184353710603:certificate/70faa022-0108-4102-abfc-676bb3b29fd6"
 
 # Your CockroachDB Cloud connection string (same one in Railway today)
 database_url = "postgresql://apexaegis_user:g_MT5YJBqN0ii5srFxuUEg@apexaegis-db-26909.j77.aws-ap-southeast-1.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full"
@@ -31,3 +35,4 @@ desired_count = 1
 
 # ACM PCA trust store for gateway mTLS — from pca/ workspace output
 gateway_trust_store_arn = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-gateway-trust/5ba7a91caa52647d"
+device_trust_store_arn  = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-gateway-trust/5ba7a91caa52647d"

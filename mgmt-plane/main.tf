@@ -38,12 +38,24 @@ variable "gateway_domain" {
   default     = "gateway-api.apexaegis.app"
 }
 
+variable "device_domain" {
+  description = "Desktop/mobile client REST hostname. This listener requires device mTLS and still uses port 443."
+  type        = string
+  default     = "device-api.apexaegis.app"
+}
+
 variable "acm_certificate_arn" {
   description = "ARN of the ACM certificate for api.apexaegis.app (must be in ap-southeast-1)"
 }
 
 variable "gateway_acm_certificate_arn" {
   description = "Optional ACM certificate ARN for gateway_domain. Leave empty when acm_certificate_arn covers both hostnames."
+  type        = string
+  default     = ""
+}
+
+variable "device_acm_certificate_arn" {
+  description = "Optional ACM certificate ARN for device_domain. Leave empty when acm_certificate_arn covers both hostnames."
   type        = string
   default     = ""
 }
@@ -92,6 +104,11 @@ variable "desired_count" {
 
 variable "gateway_trust_store_arn" {
   description = "ALB trust store ARN for the gateway-only gRPC mTLS listener."
+  type        = string
+}
+
+variable "device_trust_store_arn" {
+  description = "ALB trust store ARN for desktop/mobile device certificates."
   type        = string
 }
 
@@ -148,6 +165,7 @@ data "aws_ecr_image" "mgmt_plane" {
 locals {
   ecr_image                   = "${aws_ecr_repository.mgmt_plane.repository_url}@${data.aws_ecr_image.mgmt_plane.image_digest}"
   gateway_acm_certificate_arn = var.gateway_acm_certificate_arn != "" ? var.gateway_acm_certificate_arn : var.acm_certificate_arn
+  device_acm_certificate_arn  = var.device_acm_certificate_arn != "" ? var.device_acm_certificate_arn : var.acm_certificate_arn
 }
 
 # ── Security Groups ────────────────────────────────────────────────────────
@@ -232,6 +250,19 @@ resource "aws_lb" "gateway_control" {
   }
 }
 
+resource "aws_lb" "device_api" {
+  name               = "apexaegis-device-api"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = data.aws_subnets.default.ids
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-device-api"
+  }
+}
+
 resource "aws_lb_target_group" "mgmt" {
   name_prefix      = "apx-mg"
   port             = 443
@@ -255,6 +286,34 @@ resource "aws_lb_target_group" "mgmt" {
   }
 
   tags = { Project = "apexaegis" }
+}
+
+resource "aws_lb_target_group" "device_rest" {
+  name_prefix      = "apx-dv"
+  port             = 443
+  protocol         = "HTTP"
+  protocol_version = "HTTP1"
+  target_type      = "ip"
+  vpc_id           = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    protocol            = "HTTP"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-device-rest"
+  }
 }
 
 resource "aws_lb_target_group" "gateway_grpc" {
@@ -282,6 +341,28 @@ resource "aws_lb_target_group" "gateway_grpc" {
   tags = {
     Project = "apexaegis"
     Name    = "apexaegis-gateway-grpc"
+  }
+}
+
+resource "aws_lb_listener" "device_rest_mtls" {
+  load_balancer_arn = aws_lb.device_api.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = local.device_acm_certificate_arn
+
+  # Desktop/mobile production runtime API. ALB verifies device certificates
+  # from AWS Private CA / MDM deployment and forwards x-amzn-mtls-clientcert-*
+  # headers. The management plane then validates tenant, fingerprint, serial,
+  # and device status before serving client config or routing policy.
+  mutual_authentication {
+    mode            = "verify"
+    trust_store_arn = var.device_trust_store_arn
+  }
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.device_rest.arn
   }
 }
 
@@ -541,6 +622,12 @@ resource "aws_ecs_service" "mgmt" {
   }
 
   load_balancer {
+    target_group_arn = aws_lb_target_group.device_rest.arn
+    container_name   = "management-plane"
+    container_port   = 443
+  }
+
+  load_balancer {
     target_group_arn = aws_lb_target_group.gateway_grpc.arn
     container_name   = "management-plane"
     container_port   = 443
@@ -553,6 +640,7 @@ resource "aws_ecs_service" "mgmt" {
 
   depends_on = [
     aws_lb_listener.https,
+    aws_lb_listener.device_rest_mtls,
     aws_lb_listener.gateway_grpc_mtls,
     aws_iam_role_policy_attachment.ecs_task_execution,
   ]
@@ -570,6 +658,16 @@ output "alb_dns_name" {
 output "gateway_control_alb_dns_name" {
   description = "Point your gateway_domain CNAME to this value"
   value       = aws_lb.gateway_control.dns_name
+}
+
+output "device_api_alb_dns_name" {
+  description = "Point your device_domain CNAME to this value"
+  value       = aws_lb.device_api.dns_name
+}
+
+output "device_api_endpoint" {
+  description = "Desktop/mobile REST mTLS endpoint"
+  value       = "${var.device_domain}:443"
 }
 
 output "gateway_control_endpoint" {

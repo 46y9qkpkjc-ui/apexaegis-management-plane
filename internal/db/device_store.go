@@ -42,6 +42,34 @@ func NewDeviceStore(db *DB, logger *zap.Logger) *DeviceStore {
 	return &DeviceStore{db: db, logger: logger}
 }
 
+// ValidateMTLSDevice verifies that a presented device certificate is active for the tenant.
+func (s *DeviceStore) ValidateMTLSDevice(ctx context.Context, orgID, fingerprint, serial string) (string, error) {
+	if orgID == "" || (fingerprint == "" && serial == "") {
+		return "", errors.New("org_id and certificate identity are required")
+	}
+
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE system_mgmt.devices
+		   SET last_seen = now(), updated_at = now()
+		 WHERE org_id = $1
+		   AND status = 'active'
+		   AND mtls_cert_not_after > now()
+		   AND (
+		     ($2 <> '' AND mtls_cert_fingerprint_sha256 = $2)
+		     OR ($3 <> '' AND mtls_cert_serial = $3)
+		   )
+		 RETURNING id
+	`, orgID, fingerprint, serial).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("device certificate is not registered or active for this tenant")
+		}
+		return "", fmt.Errorf("validate mtls device: %w", err)
+	}
+	return id, nil
+}
+
 // GetDeploymentInfo returns tenant and device-license usage.
 func (s *DeviceStore) GetDeploymentInfo(ctx context.Context, orgID string) (*DeploymentInfo, error) {
 	if orgID == "" {

@@ -7,17 +7,19 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zcp/management-plane/internal/api/middleware"
+	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/identity"
 )
 
 // IdentityBrokerHandler exposes the identity federation & broker API.
 type IdentityBrokerHandler struct {
 	broker *identity.Broker
+	store  *db.IdPStore
 	logger *zap.Logger
 }
 
-func NewIdentityBrokerHandler(broker *identity.Broker, logger *zap.Logger) *IdentityBrokerHandler {
-	return &IdentityBrokerHandler{broker: broker, logger: logger}
+func NewIdentityBrokerHandler(broker *identity.Broker, store *db.IdPStore, logger *zap.Logger) *IdentityBrokerHandler {
+	return &IdentityBrokerHandler{broker: broker, store: store, logger: logger}
 }
 
 // ── IdP CRUD ────────────────────────────────────────────────────────
@@ -66,6 +68,45 @@ func (h *IdentityBrokerHandler) DeleteIdP(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// ── IdP Usage Profiles ─────────────────────────────────────────────
+
+func (h *IdentityBrokerHandler) ListAuthProfiles(c *gin.Context) {
+	if h.store == nil {
+		middleware.AbortWithSafeError(c, http.StatusServiceUnavailable, nil)
+		return
+	}
+	profiles, err := h.store.ListAuthProfiles(c.Request.Context(), c.GetString("org_id"))
+	if err != nil {
+		middleware.AbortWithSafeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"auth_profiles": profiles})
+}
+
+func (h *IdentityBrokerHandler) UpdateAuthProfiles(c *gin.Context) {
+	if h.store == nil {
+		middleware.AbortWithSafeError(c, http.StatusServiceUnavailable, nil)
+		return
+	}
+	var req struct {
+		AuthProfiles []db.IdentityAuthProfile `json:"auth_profiles"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.AbortWithSafeError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.store.UpsertAuthProfiles(c.Request.Context(), c.GetString("org_id"), req.AuthProfiles); err != nil {
+		middleware.AbortWithSafeError(c, http.StatusBadRequest, err)
+		return
+	}
+	profiles, err := h.store.ListAuthProfiles(c.Request.Context(), c.GetString("org_id"))
+	if err != nil {
+		middleware.AbortWithSafeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"auth_profiles": profiles})
 }
 
 // ── Token Exchange (RFC 8693) ───────────────────────────────────────
