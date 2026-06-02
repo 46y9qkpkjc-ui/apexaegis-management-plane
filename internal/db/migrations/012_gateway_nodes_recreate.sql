@@ -32,5 +32,7 @@ CREATE TABLE system_mgmt.gateway_nodes (
     metadata        JSONB       NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX idx_gateway_nodes_status    ON system_mgmt.gateway_nodes (status);
-CREATE INDEX idx_gateway_nodes_heartbeat ON system_mgmt.gateway_nodes (last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_gateway_nodes_status
+  ON system_mgmt.gateway_nodes (status);
+CREATE INDEX IF NOT EXISTS idx_gateway_nodes_heartbeat
+  ON system_mgmt.gateway_nodes (last_heartbeat);

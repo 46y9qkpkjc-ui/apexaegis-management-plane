@@ -22,7 +22,7 @@ jwt_secret = "/nL+/8nJW3Ji8RQyPQO5wbekn5wMDE/gbIKiIX/rNMQ="
 gateway_api_key = "ee94927bca7b0777880e7336aa2127d4a2d14a627dd6b3a4f2afffd8140df81b"
 
 # Docker image tag (update after running build script)
-image_tag = "v1.0.0"
+image_tag = "latest"
 
 # Fargate sizing (0.5 vCPU / 1GB is plenty for demo)
 task_cpu      = 512

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -10,51 +11,51 @@ import (
 
 // DNSAccessLog represents a DNS query log entry
 type DNSAccessLog struct {
-	ID              string    `json:"id"`
-	OrgID           string    `json:"org_id"`
-	GatewayID       string    `json:"gateway_id"`
-	ClientIP        string    `json:"client_ip"`
-	Domain          string    `json:"domain"`
-	QueryType       string    `json:"query_type"`
-	Verdict         string    `json:"verdict"` // allow, block, threat_detected
-	ThreatLevel     string    `json:"threat_level,omitempty"`
-	ThreatCategory  string    `json:"threat_category,omitempty"`
-	PolicyName      string    `json:"policy_name,omitempty"`
-	Action          string    `json:"action"` // allow, block, monitor, dns-block
-	Severity        string    `json:"severity"` // critical, high, medium, low, info
-	ResponseTimeMs  int       `json:"response_time_ms"`
-	ResponseCode    int       `json:"response_code,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	GatewayID      string    `json:"gateway_id"`
+	ClientIP       string    `json:"client_ip"`
+	Domain         string    `json:"domain"`
+	QueryType      string    `json:"query_type"`
+	Verdict        string    `json:"verdict"` // allow, block, threat_detected
+	ThreatLevel    string    `json:"threat_level,omitempty"`
+	ThreatCategory string    `json:"threat_category,omitempty"`
+	PolicyName     string    `json:"policy_name,omitempty"`
+	Action         string    `json:"action"`   // allow, block, monitor, dns-block
+	Severity       string    `json:"severity"` // critical, high, medium, low, info
+	ResponseTimeMs int       `json:"response_time_ms"`
+	ResponseCode   int       `json:"response_code,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // DNSErrorLog represents a DNS error log entry
 type DNSErrorLog struct {
-	ID          string    `json:"id"`
-	OrgID       string    `json:"org_id"`
-	GatewayID   string    `json:"gateway_id"`
-	ErrorType   string    `json:"error_type"`
-	ErrorMessage string   `json:"error_message"`
-	Domain      string    `json:"domain,omitempty"`
-	ClientIP    string    `json:"client_ip,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	GatewayID    string    `json:"gateway_id"`
+	ErrorType    string    `json:"error_type"`
+	ErrorMessage string    `json:"error_message"`
+	Domain       string    `json:"domain,omitempty"`
+	ClientIP     string    `json:"client_ip,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // DNSQueryStats represents aggregated DNS query statistics
 type DNSQueryStats struct {
-	ID                 string          `json:"id"`
-	OrgID              string          `json:"org_id"`
-	HourBucket         time.Time       `json:"hour_bucket"`
-	TotalQueries       int             `json:"total_queries"`
-	AllowedQueries     int             `json:"allowed_queries"`
-	BlockedQueries     int             `json:"blocked_queries"`
-	ThreatDetected     int             `json:"threat_detected"`
-	Errors             int             `json:"errors"`
-	AvgResponseTimeMs  float64         `json:"avg_response_time_ms"`
-	MaxResponseTimeMs  int             `json:"max_response_time_ms"`
-	TopDomains         json.RawMessage `json:"top_domains"`
-	TopClients         json.RawMessage `json:"top_clients"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	OrgID             string          `json:"org_id"`
+	HourBucket        time.Time       `json:"hour_bucket"`
+	TotalQueries      int             `json:"total_queries"`
+	AllowedQueries    int             `json:"allowed_queries"`
+	BlockedQueries    int             `json:"blocked_queries"`
+	ThreatDetected    int             `json:"threat_detected"`
+	Errors            int             `json:"errors"`
+	AvgResponseTimeMs float64         `json:"avg_response_time_ms"`
+	MaxResponseTimeMs int             `json:"max_response_time_ms"`
+	TopDomains        json.RawMessage `json:"top_domains"`
+	TopClients        json.RawMessage `json:"top_clients"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 // DNSLogStore provides DNS logging operations
@@ -122,49 +123,49 @@ func (s *DNSLogStore) GetDNSLogs(ctx context.Context, orgID string, filters map[
 
 	// Optional filters
 	if domain, ok := filters["domain"]; ok && domain != "" {
-		query += ` AND domain = $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND domain = $%d", argIndex)
 		args = append(args, domain)
 		argIndex++
 	}
 
 	if clientIP, ok := filters["client_ip"]; ok && clientIP != "" {
-		query += ` AND client_ip = $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND client_ip = $%d", argIndex)
 		args = append(args, clientIP)
 		argIndex++
 	}
 
 	if verdict, ok := filters["verdict"]; ok && verdict != "" {
-		query += ` AND verdict = $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND verdict = $%d", argIndex)
 		args = append(args, verdict)
 		argIndex++
 	}
 
 	if threatLevel, ok := filters["threat_level"]; ok && threatLevel != "" {
-		query += ` AND threat_level = $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND threat_level = $%d", argIndex)
 		args = append(args, threatLevel)
 		argIndex++
 	}
 
 	if action, ok := filters["action"]; ok && action != "" {
-		query += ` AND action = $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND action = $%d", argIndex)
 		args = append(args, action)
 		argIndex++
 	}
 
 	// Time filter
 	if startTime, ok := filters["start_time"]; ok {
-		query += ` AND created_at >= $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND created_at >= $%d", argIndex)
 		args = append(args, startTime)
 		argIndex++
 	}
 
 	if endTime, ok := filters["end_time"]; ok {
-		query += ` AND created_at <= $` + string(rune(argIndex))
+		query += fmt.Sprintf(" AND created_at <= $%d", argIndex)
 		args = append(args, endTime)
 		argIndex++
 	}
 
-	query += ` ORDER BY created_at DESC LIMIT $` + string(rune(argIndex)) + ` OFFSET $` + string(rune(argIndex+1))
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
 	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

@@ -11,22 +11,22 @@ import (
 
 // IdPConfigLog represents a single IdP configuration event log
 type IdPConfigLog struct {
-	ID              string    `json:"id"`
-	OrgID           string    `json:"org_id"`
-	IdPID           string    `json:"idp_id"`
-	EventType       string    `json:"event_type"` // create, update, test, enable, disable
-	ProviderType    string    `json:"provider_type"` // okta, azure_ad, google, saml, ldap
-	ProviderName    string    `json:"provider_name"`
-	ActionBy        string    `json:"action_by"`
-	ActionTimestamp time.Time `json:"action_timestamp"`
-	Status          string    `json:"status"` // success, failure
-	ChangeType      string    `json:"change_type,omitempty"`
+	ID              string                 `json:"id"`
+	OrgID           string                 `json:"org_id"`
+	IdPID           string                 `json:"idp_id"`
+	EventType       string                 `json:"event_type"`    // create, update, test, enable, disable
+	ProviderType    string                 `json:"provider_type"` // okta, azure_ad, google, saml, ldap
+	ProviderName    string                 `json:"provider_name"`
+	ActionBy        string                 `json:"action_by"`
+	ActionTimestamp time.Time              `json:"action_timestamp"`
+	Status          string                 `json:"status"` // success, failure
+	ChangeType      string                 `json:"change_type,omitempty"`
 	OldValues       map[string]interface{} `json:"old_values,omitempty"`
 	NewValues       map[string]interface{} `json:"new_values,omitempty"`
-	TestResult      string    `json:"test_result,omitempty"` // success, failed_auth, timeout
-	TestDurationMs  int       `json:"test_duration_ms,omitempty"`
-	ErrorMessage    string    `json:"error_message,omitempty"`
-	ClientIP        string    `json:"client_ip,omitempty"`
+	TestResult      string                 `json:"test_result,omitempty"` // success, failed_auth, timeout
+	TestDurationMs  int                    `json:"test_duration_ms,omitempty"`
+	ErrorMessage    string                 `json:"error_message,omitempty"`
+	ClientIP        string                 `json:"client_ip,omitempty"`
 }
 
 // IdPLogStore handles logging for IdP configuration events
@@ -53,8 +53,14 @@ func (s *IdPLogStore) LogEvent(ctx context.Context, orgID, idPID, eventType, pro
 	newValuesJSON, _ := json.Marshal(opts.NewValues)
 
 	_, err := s.db.ExecContext(ctx, `
-		SELECT system_mgmt.log_idp_event(
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+		INSERT INTO system_mgmt.idp_config_logs (
+			org_id, idp_id, event_type, provider_type, provider_name,
+			action_by, status, change_type, old_values, new_values,
+			test_result, test_duration_ms, error_message, client_ip
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9::JSONB, $10::JSONB,
+			$11, $12, $13, $14
 		)
 	`,
 		orgID,
@@ -83,13 +89,13 @@ func (s *IdPLogStore) LogEvent(ctx context.Context, orgID, idPID, eventType, pro
 
 // LogEventOptions contains optional fields for logging events
 type LogEventOptions struct {
-	ChangeType      string
-	OldValues       map[string]interface{}
-	NewValues       map[string]interface{}
-	TestResult      string // success, failed_auth, failed_network, timeout, etc.
-	TestDurationMs  int
-	ErrorMessage    string
-	ClientIP        string
+	ChangeType     string
+	OldValues      map[string]interface{}
+	NewValues      map[string]interface{}
+	TestResult     string // success, failed_auth, failed_network, timeout, etc.
+	TestDurationMs int
+	ErrorMessage   string
+	ClientIP       string
 }
 
 // GetLogs retrieves IdP configuration logs for an organization
@@ -98,18 +104,33 @@ func (s *IdPLogStore) GetLogs(ctx context.Context, orgID string, filters LogFilt
 		return nil, fmt.Errorf("orgID is required")
 	}
 
-	// Use helper function with filters
+	limit := filters.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := filters.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			id, idp_id, provider_type, provider_name, event_type,
-			action_by, status, test_result, error_message, action_timestamp
-		FROM system_mgmt.get_idp_logs($1, $2, $3, $4, $5)
+			COALESCE(action_by, ''), COALESCE(status, ''),
+			COALESCE(test_result, ''), COALESCE(error_message, ''),
+			action_timestamp
+		FROM system_mgmt.idp_config_logs
+		WHERE org_id = $1
+		  AND ($2 = '' OR provider_type = $2)
+		  AND ($3 = '' OR event_type = $3)
+		ORDER BY action_timestamp DESC
+		LIMIT $4 OFFSET $5
 	`,
 		orgID,
 		filters.ProviderType,
 		filters.EventType,
-		filters.Limit,
-		filters.Offset,
+		limit,
+		offset,
 	)
 
 	if err != nil {
@@ -188,11 +209,11 @@ func (s *IdPLogStore) GetLogSummary(ctx context.Context, orgID string) (map[stri
 		}
 
 		providerStats = append(providerStats, map[string]interface{}{
-			"provider_type":      providerType,
-			"total_events":       totalEvents,
-			"successful_events":  successfulEvents,
-			"failed_events":      failedEvents,
-			"last_event":         lastEvent.Format(time.RFC3339),
+			"provider_type":     providerType,
+			"total_events":      totalEvents,
+			"successful_events": successfulEvents,
+			"failed_events":     failedEvents,
+			"last_event":        lastEvent.Format(time.RFC3339),
 		})
 	}
 

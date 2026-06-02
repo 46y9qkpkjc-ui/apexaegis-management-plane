@@ -4,10 +4,19 @@
 aws_account_id      = "184353710603"
 aws_region          = "ap-southeast-1"
 domain              = "api.apexaegis.app"
+gateway_domain      = "gateway-api.apexaegis.app"
 
 # Get this from AWS Certificate Manager after requesting a cert for api.apexaegis.app
 # Must be in ap-southeast-1 (same region as ALB)
 acm_certificate_arn = "arn:aws:acm:ap-southeast-1:184353710603:certificate/REPLACE-ME"
+
+# Optional. Leave empty when acm_certificate_arn is a wildcard/SAN cert that
+# covers both api.apexaegis.app and gateway-api.apexaegis.app.
+gateway_acm_certificate_arn = ""
+
+# Required for the gateway-only gRPC listener. Create this from the ACM PCA /
+# gateway CA trust bundle so ALB can verify gateway client certificates.
+gateway_trust_store_arn = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/REPLACE-ME"
 
 # Your CockroachDB Cloud connection string (same one in Railway today)
 database_url        = "postgresql://..."

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -223,7 +224,7 @@ func (h *DNSLogsHandler) GetDNSSummary(c *gin.Context) {
 		BlockedQueries:     0, // Could calculate from stats
 		BlockRatePercent:   blockRate,
 		AvgResponseTimeMs:  avgResponseTime,
-		TimeRange:          hours - 1, // Will need to format properly
+		TimeRange:          fmt.Sprintf("%dh", hours),
 	}
 
 	c.JSON(http.StatusOK, response)

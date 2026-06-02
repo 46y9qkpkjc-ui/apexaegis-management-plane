@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,8 +30,14 @@ import (
 	"github.com/zcp/management-plane/internal/policy"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -42,11 +50,12 @@ type Deps struct {
 
 // Config for the gRPC server.
 type Config struct {
-	ListenAddr string // e.g. ":9443"
-	CertFile   string // server TLS cert
-	KeyFile    string // server TLS key
-	CACertFile string // CA cert for verifying gateway client certs
-	DevMode    bool   // disable mTLS
+	ListenAddr            string // e.g. ":9443"
+	CertFile              string // server TLS cert
+	KeyFile               string // server TLS key
+	CACertFile            string // CA cert for verifying gateway client certs
+	DevMode               bool   // disable mTLS
+	RequireClientIdentity bool   // require ALB mTLS or direct TLS identity
 }
 
 // Server wraps the gRPC server and implements GatewayControlServer.
@@ -103,6 +112,10 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 
 	grpcServer := grpc.NewServer(opts...)
 	pb.RegisterGatewayControlServer(grpcServer, s)
+	healthSrv := health.NewServer()
+	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthSrv.SetServingStatus(pb.GatewayControl_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthSrv)
 
 	// Policy change broadcaster
 	go s.broadcastLoop(ctx)
@@ -123,6 +136,10 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 // ═══════════════════════════════════════════════════════════════════════════
 
 func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
+	if err := s.authorizeGateway(ctx, req.GatewayId); err != nil {
+		return nil, err
+	}
+
 	s.logger.Info("Gateway register via gRPC",
 		zap.String("gateway_id", req.GatewayId),
 		zap.String("region", req.Region),
@@ -154,6 +171,10 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 }
 
 func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+	if err := s.authorizeGateway(ctx, req.GatewayId); err != nil {
+		return nil, err
+	}
+
 	ok := s.deps.Registry.Heartbeat(req.GatewayId, req.PolicyVersion)
 	if !ok {
 		return &pb.HeartbeatResponse{
@@ -175,6 +196,10 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 }
 
 func (s *Server) SyncPolicies(ctx context.Context, req *pb.SyncPoliciesRequest) (*pb.SyncPoliciesResponse, error) {
+	if err := s.authorizeGateway(ctx, req.GatewayId); err != nil {
+		return nil, err
+	}
+
 	s.logger.Info("Policy sync requested",
 		zap.String("gateway", req.GatewayId),
 		zap.Int64("since_version", req.SinceVersion),
@@ -204,6 +229,10 @@ func (s *Server) SyncPolicies(ctx context.Context, req *pb.SyncPoliciesRequest) 
 
 func (s *Server) PolicyStream(req *pb.PolicyStreamRequest, stream grpc.ServerStreamingServer[pb.PolicyEvent]) error {
 	gatewayID := req.GatewayId
+	if err := s.authorizeGateway(stream.Context(), gatewayID); err != nil {
+		return err
+	}
+
 	s.logger.Info("Policy stream opened", zap.String("gateway", gatewayID))
 
 	// Create a per-gateway event channel
@@ -259,6 +288,9 @@ func (s *Server) ReportTelemetry(stream grpc.ClientStreamingServer[pb.TelemetryE
 			return err
 		}
 		count++
+		if err := s.authorizeGateway(stream.Context(), evt.GatewayId); err != nil {
+			return err
+		}
 
 		// Process telemetry — log and forward to metrics pipeline
 		s.logger.Debug("Telemetry event",
@@ -270,6 +302,10 @@ func (s *Server) ReportTelemetry(stream grpc.ClientStreamingServer[pb.TelemetryE
 }
 
 func (s *Server) IssueCertificate(ctx context.Context, req *pb.CertRequest) (*pb.CertResponse, error) {
+	if err := s.authorizeGateway(ctx, req.GatewayId); err != nil {
+		return nil, err
+	}
+
 	// TODO: sign the CSR with the internal CA and return the cert
 	s.logger.Info("Certificate issuance requested via gRPC",
 		zap.String("gateway", req.GatewayId),
@@ -329,6 +365,10 @@ func (s *Server) ConnectedGateways() int {
 // ═══════════════════════════════════════════════════════════════════════════
 
 func (s *Server) buildServerTLS() (*tls.Config, error) {
+	if s.cfg.CertFile == "" || s.cfg.KeyFile == "" || s.cfg.CACertFile == "" {
+		return nil, fmt.Errorf("GRPC_TLS_ENABLED=true requires GRPC_TLS_CERT_FILE, GRPC_TLS_KEY_FILE, and GRPC_TLS_CA_FILE")
+	}
+
 	cert, err := tls.LoadX509KeyPair(s.cfg.CertFile, s.cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load server cert: %w", err)
@@ -350,6 +390,82 @@ func (s *Server) buildServerTLS() (*tls.Config, error) {
 		ClientCAs:    caPool,
 		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+func (s *Server) authorizeGateway(ctx context.Context, gatewayID string) error {
+	if gatewayID == "" {
+		return status.Error(codes.InvalidArgument, "gateway_id is required")
+	}
+	if !s.cfg.RequireClientIdentity {
+		return nil
+	}
+
+	certGatewayID := gatewayIDFromPeerCertificate(ctx)
+	if certGatewayID == "" {
+		certGatewayID = gatewayIDFromALBMTLSMetadata(ctx)
+	}
+	if certGatewayID == "" {
+		return status.Error(codes.Unauthenticated, "gateway mTLS identity is required")
+	}
+	if !gatewayIDMatchesCertificate(gatewayID, certGatewayID) {
+		s.logger.Warn("Gateway gRPC identity mismatch",
+			zap.String("claimed_gateway_id", gatewayID),
+			zap.String("cert_gateway_id", certGatewayID),
+		)
+		return status.Error(codes.PermissionDenied, "gateway_id does not match mTLS certificate")
+	}
+	return nil
+}
+
+func gatewayIDFromPeerCertificate(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return ""
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return ""
+	}
+	return tlsInfo.State.PeerCertificates[0].Subject.CommonName
+}
+
+func gatewayIDFromALBMTLSMetadata(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{
+		"x-amzn-mtls-clientcert-subject",
+		"x-amzn-mtls-clientcert-subjectdn",
+	} {
+		values := md.Get(key)
+		if len(values) == 0 {
+			continue
+		}
+		subject, err := url.QueryUnescape(values[0])
+		if err != nil {
+			subject = values[0]
+		}
+		if cn := extractCN(subject); cn != "" {
+			return cn
+		}
+	}
+	return ""
+}
+
+func gatewayIDMatchesCertificate(claimed, certCN string) bool {
+	certGatewayID := strings.TrimPrefix(certCN, "apexaegis-gw-")
+	return claimed == certCN || claimed == certGatewayID
+}
+
+func extractCN(subject string) string {
+	for _, part := range strings.Split(subject, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "CN=") {
+			return strings.TrimPrefix(part, "CN=")
+		}
+	}
+	return ""
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

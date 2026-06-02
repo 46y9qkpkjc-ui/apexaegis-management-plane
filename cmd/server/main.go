@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/zcp/management-plane/internal/api/handlers"
 	"github.com/zcp/management-plane/internal/api/middleware"
@@ -37,7 +41,7 @@ import (
 )
 
 func main() {
-	logger, _ := zap.NewProduction()
+	logger, _ := newLogger()
 	defer logger.Sync()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,7 +88,8 @@ func main() {
 		logger.Fatal("DATABASE_URL is required — set it to your CockroachDB Cloud connection string")
 	}
 
-	dbConn, err := db.Open(db.Config{DSN: databaseURL}, logger)
+	tenantOrgID := envOrDefault("APP_TENANT_ORG_ID", db.SystemThreatOrgID)
+	dbConn, err := db.Open(db.Config{DSN: databaseURL, TenantOrgID: tenantOrgID}, logger)
 	if err != nil {
 		logger.Fatal("Failed to connect to CockroachDB Cloud", zap.Error(err))
 	}
@@ -92,8 +97,10 @@ func main() {
 	// Run schema migrations on startup (idempotent — skips already-applied)
 	migrationsDir := envOrDefault("MIGRATIONS_DIR", "internal/db/migrations")
 	if migErr := dbConn.Migrate(migrationsDir); migErr != nil {
-		fmt.Fprintf(os.Stderr, "MIGRATION ERROR: %v\n", migErr)
-		logger.Fatal("Schema migration failed", zap.Error(migErr))
+		logger.Fatal("Schema migration failed",
+			zap.Error(migErr),
+			zap.String("migration_dir", migrationsDir),
+		)
 	}
 
 	// ── Stores (CockroachDB Cloud backed) ──
@@ -102,7 +109,7 @@ func main() {
 
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
-	tokenStore := db.NewTokenStore(dbConn, logger)
+	deviceStore := db.NewDeviceStore(dbConn, logger)
 
 	// ── Gateway registry persistence ──
 	gwStore := db.NewGatewayStore(dbConn)
@@ -194,7 +201,7 @@ func main() {
 
 	// ── Code signing, enrollment tokens, command signing ──
 	codeSigningSvc := security.NewCodeSigningService(logger)
-	enrollmentSvc := security.NewEnrollmentService(logger)
+	enrollmentSvc := security.NewEnrollmentService(logger, ca)
 	commandSigningSvc := security.NewCommandSigningService(codeSigningSvc, logger)
 
 	// ── JWKS key rotation (manages Ed25519 signing keys + ECDSA CA keys) ──
@@ -316,10 +323,11 @@ func main() {
 		scimAPI.DELETE("/Groups/:id", scimHandler.DeleteGroup)
 	}
 
-	// Gateway-facing API (authenticated by gateway API key or mTLS)
-	gwAPI := router.Group("/api/v1/gateway")
-	gwAPI.Use(middleware.GatewayAuth(gwRegistry))
-	{
+	// Legacy gateway-facing REST API. Production gateway control uses the
+	// GatewayControl gRPC service over the gateway-only mTLS listener.
+	if os.Getenv("GATEWAY_REST_ENABLED") == "true" {
+		gwAPI := router.Group("/api/v1/gateway")
+		gwAPI.Use(middleware.GatewayAuth(gwRegistry))
 		gwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
 		gwAPI.POST("/register", gwHandler.Register)
 		gwAPI.GET("/policies", gwHandler.GetPolicies)
@@ -336,6 +344,8 @@ func main() {
 
 		// WebSocket for push-based policy updates
 		gwAPI.GET("/policies/ws", wsHub.HandleSubscribe)
+	} else {
+		logger.Info("Legacy gateway REST API disabled; using gRPC gateway control")
 	}
 
 	// Public Gateway Discovery API (for desktop-client to discover available gateways)
@@ -350,6 +360,8 @@ func main() {
 	agentAPI := router.Group("/api/v1/agent")
 	{
 		agentHandler := handlers.NewAgentHandler(policyStore, logger)
+		agentAuthHandler := handlers.NewAgentAuthHandler(deviceStore, authStore, logger)
+		agentAPI.POST("/auth", agentAuthHandler.Authenticate)
 		agentAPI.GET("/policies", agentHandler.GetPolicies)
 	}
 
@@ -379,6 +391,19 @@ func main() {
 		adminAPI.GET("/policies", adminHandler.ListPolicies)
 		adminAPI.DELETE("/policies/:id", adminHandler.DeletePolicy)
 		adminAPI.GET("/mesh/topology", adminHandler.GetMeshTopology)
+		adminAPI.GET("/organization/deployment-info", func(c *gin.Context) {
+			orgID := c.GetString("org_id")
+			if orgID == "" {
+				c.JSON(401, gin.H{"error": "org_id not found in context"})
+				return
+			}
+			info, infoErr := deviceStore.GetDeploymentInfo(c.Request.Context(), orgID)
+			if infoErr != nil {
+				c.JSON(500, gin.H{"error": "failed to get deployment info"})
+				return
+			}
+			c.JSON(200, info)
+		})
 
 		// Config version control (last 10 revisions, revert capability)
 		adminAPI.GET("/config/versions", adminHandler.ListConfigVersions)
@@ -390,13 +415,6 @@ func main() {
 		adminAPI.POST("/config/lock", adminHandler.AcquireConfigLock)
 		adminAPI.DELETE("/config/lock", adminHandler.ReleaseConfigLock)
 		adminAPI.GET("/config/lock", adminHandler.GetConfigLock)
-
-		// API Token Management (for desktop-client registration & license tracking)
-		tokenHandler := handlers.NewTokenHandler(tokenStore, logger)
-		adminAPI.POST("/tokens", tokenHandler.CreateToken)
-		adminAPI.GET("/tokens", tokenHandler.ListTokens)
-		adminAPI.DELETE("/tokens/:id", tokenHandler.RevokeToken)
-		adminAPI.GET("/organization/deployment-info", tokenHandler.GetDeploymentInfo)
 
 		// IdP Configuration Logging (audit trail for IdP integration changes)
 		idpLogsHandler := handlers.NewIdPLogsHandler(idpLogStore, logger)
@@ -566,15 +584,9 @@ func main() {
 
 	// Initialize fetcher with API keys from environment
 	vtAPIKey := os.Getenv("VIRUSTOTAL_API_KEY")
-	if vtAPIKey == "" {
-		vtAPIKey = "331e2c7621ac99a5d844abd0ce56bd181ac1a08ae045c172af997f5f133d066c" // Demo key
-	}
 	otxAPIKey := os.Getenv("OTX_API_KEY")
 	// OTX requires LevelBlue USM integration, skip for now
 	urlscanAPIKey := os.Getenv("URLSCAN_API_KEY")
-	if urlscanAPIKey == "" {
-		urlscanAPIKey = "019e88fa-8670-7789-800f-a1de113bff53" // Demo key
-	}
 
 	threatFetcher := threat_intel.NewThreatFetcher(otxAPIKey, vtAPIKey, urlscanAPIKey, logger)
 	syncService := threat_intel.NewSyncService(threatStore, threatFetcher, logger)
@@ -639,11 +651,9 @@ func main() {
 		securityAPI.GET("/keys", secHandler.ListSigningKeys)
 		securityAPI.GET("/keys/:id", secHandler.GetPublicKey)
 
-		// Enrollment tokens
-		securityAPI.POST("/enrollment/tokens", secHandler.CreateEnrollmentToken)
-		securityAPI.GET("/enrollment/tokens", secHandler.ListEnrollmentTokens)
-		securityAPI.DELETE("/enrollment/tokens/:id", secHandler.RevokeEnrollmentToken)
-		securityAPI.POST("/enrollment/enroll", secHandler.EnrollAgent)
+		// Device enrollment is certificate-driven. The portal/MDM issues device
+		// certificates; runtime registration happens through /api/v1/agent/auth
+		// using mTLS, not one-time registration tokens.
 		securityAPI.GET("/enrollment/agents", secHandler.ListEnrolledAgents)
 		securityAPI.DELETE("/enrollment/agents/:id", secHandler.DeactivateAgent)
 
@@ -654,13 +664,20 @@ func main() {
 		securityAPI.GET("/commands/pending/:targetId", secHandler.GetPendingCommands)
 	}
 
-	// ── Start mTLS server for gateway-to-mgmt-plane communication ──
-	// Skipped in demo/cloud mode — Railway only exposes one port.
-	// Gateways authenticate via GATEWAY_API_KEY over the shared gRPC+HTTP port.
-	// Enable in production by setting MTLS_ENABLED=true with a dedicated port.
+	listenAddr := envOrDefault("LISTEN_ADDR", ":443")
+	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
+
+	// ── Start optional dedicated mTLS server for gateway-to-mgmt-plane communication ──
+	// Production gateway control uses gRPC behind a gateway-only mTLS ALB/NLB.
+	// Keep this legacy REST mTLS listener disabled unless a lab deployment needs it.
 	if os.Getenv("MTLS_ENABLED") == "true" {
-		go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
-		logger.Info("mTLS server enabled", zap.String("addr", envOrDefault("MTLS_LISTEN_ADDR", ":9443")))
+		mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", listenAddr)
+		if mtlsAddr == listenAddr {
+			logger.Info("mTLS enabled on shared REST+gRPC listener", zap.String("addr", listenAddr))
+		} else {
+			go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
+			logger.Info("dedicated mTLS server enabled", zap.String("addr", mtlsAddr))
+		}
 	} else {
 		logger.Info("mTLS server disabled (set MTLS_ENABLED=true to enable)")
 	}
@@ -668,9 +685,6 @@ func main() {
 	// ── Multiplex gRPC + HTTP on a single port (Railway only exposes one port) ──
 	// gRPC requests carry "Content-Type: application/grpc" — cmux routes them
 	// to the gRPC server; everything else goes to the Gin HTTP handler.
-	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
-	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
-
 	logger.Info("Starting multiplexed gRPC+HTTP listener",
 		zap.String("addr", listenAddr),
 		zap.String("deploy_mode", deployMode),
@@ -689,7 +703,11 @@ func main() {
 
 	// gRPC server
 	grpcSrv := grpcserver.NewServer(grpcserver.Config{
-		DevMode: deployMode == "dev",
+		CertFile:              os.Getenv("GRPC_TLS_CERT_FILE"),
+		KeyFile:               os.Getenv("GRPC_TLS_KEY_FILE"),
+		CACertFile:            os.Getenv("GRPC_TLS_CA_FILE"),
+		DevMode:               os.Getenv("GRPC_TLS_ENABLED") != "true",
+		RequireClientIdentity: os.Getenv("GRPC_REQUIRE_CLIENT_IDENTITY") == "true",
 	}, grpcserver.Deps{
 		PolicyStore: policyStore,
 		Registry:    gwRegistry,
@@ -747,7 +765,7 @@ func startMTLSServer(
 	wsHub *websocket.Hub,
 	logger *zap.Logger,
 ) {
-	mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", ":9443")
+	mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", ":443")
 	tlsConfig := ca.ServerTLSConfig()
 
 	router := gin.New()
@@ -780,4 +798,153 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func newLogger() (*zap.Logger, error) {
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		return zap.NewProduction()
+	}
+
+	level := zapcore.InfoLevel
+	if strings.EqualFold(os.Getenv("LOG_LEVEL"), "debug") {
+		level = zapcore.DebugLevel
+	}
+
+	core := &cefCore{
+		out:     os.Stderr,
+		mu:      &sync.Mutex{},
+		enabler: zap.LevelEnablerFunc(func(l zapcore.Level) bool { return l >= level }),
+	}
+
+	return zap.New(
+		core,
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.FatalLevel),
+	), nil
+}
+
+type cefCore struct {
+	mu      *sync.Mutex
+	out     *os.File
+	enabler zapcore.LevelEnabler
+	fields  []zapcore.Field
+}
+
+func (c *cefCore) Enabled(level zapcore.Level) bool {
+	return c.enabler.Enabled(level)
+}
+
+func (c *cefCore) With(fields []zapcore.Field) zapcore.Core {
+	next := *c
+	next.fields = append(append([]zapcore.Field{}, c.fields...), fields...)
+	return &next
+}
+
+func (c *cefCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Enabled(entry.Level) {
+		return checked.AddCore(entry, c)
+	}
+	return checked
+}
+
+func (c *cefCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
+	allFields := append(append([]zapcore.Field{}, c.fields...), fields...)
+
+	extensions := []string{
+		"end=" + strconv.FormatInt(entry.Time.UnixMilli(), 10),
+		"msg=" + cefEscape(entry.Message),
+		"sourceServiceName=management-plane",
+	}
+	if entry.Caller.Defined {
+		extensions = append(extensions, "cs1Label=caller", "cs1="+cefEscape(entry.Caller.TrimmedPath()))
+	}
+	if entry.Stack != "" {
+		extensions = append(extensions, "cs2Label=stack", "cs2="+cefEscape(entry.Stack))
+	}
+	for _, field := range allFields {
+		key := cefKey(field.Key)
+		if key == "" {
+			continue
+		}
+		extensions = append(extensions, key+"="+cefEscape(cefFieldValue(field)))
+	}
+
+	line := fmt.Sprintf("CEF:0|ApexAegis|ManagementPlane|1.0|%s|%s|%d|%s\n",
+		cefHeaderEscape(entry.Level.String()),
+		cefHeaderEscape(entry.Message),
+		cefSeverity(entry.Level),
+		strings.Join(extensions, " "),
+	)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.out.WriteString(line)
+	return err
+}
+
+func (c *cefCore) Sync() error {
+	return c.out.Sync()
+}
+
+func cefSeverity(level zapcore.Level) int {
+	switch {
+	case level >= zapcore.FatalLevel:
+		return 10
+	case level >= zapcore.ErrorLevel:
+		return 8
+	case level >= zapcore.WarnLevel:
+		return 6
+	case level >= zapcore.InfoLevel:
+		return 3
+	default:
+		return 1
+	}
+}
+
+func cefFieldValue(field zapcore.Field) string {
+	switch field.Type {
+	case zapcore.StringType:
+		return field.String
+	case zapcore.ErrorType:
+		if err, ok := field.Interface.(error); ok && err != nil {
+			return err.Error()
+		}
+	case zapcore.BoolType:
+		return strconv.FormatBool(field.Integer == 1)
+	case zapcore.Int64Type, zapcore.Int32Type, zapcore.Int16Type, zapcore.Int8Type:
+		return strconv.FormatInt(field.Integer, 10)
+	case zapcore.Uint64Type, zapcore.Uint32Type, zapcore.Uint16Type, zapcore.Uint8Type, zapcore.UintptrType:
+		return strconv.FormatUint(uint64(field.Integer), 10)
+	case zapcore.Float64Type:
+		return strconv.FormatFloat(math.Float64frombits(uint64(field.Integer)), 'f', -1, 64)
+	case zapcore.Float32Type:
+		return strconv.FormatFloat(float64(math.Float32frombits(uint32(field.Integer))), 'f', -1, 32)
+	case zapcore.DurationType:
+		return time.Duration(field.Integer).String()
+	case zapcore.TimeType:
+		return time.Unix(0, field.Integer).UTC().Format(time.RFC3339Nano)
+	default:
+		if field.Interface != nil {
+			return fmt.Sprint(field.Interface)
+		}
+	}
+	return field.String
+}
+
+func cefKey(key string) string {
+	var b strings.Builder
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func cefHeaderEscape(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "|", "\\|", "\n", " ", "\r", " ").Replace(value)
+}
+
+func cefEscape(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "=", "\\=", "|", "\\|", "\n", "\\n", "\r", "\\r").Replace(value)
 }

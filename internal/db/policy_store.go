@@ -325,12 +325,12 @@ func (s *PolicyStore) Diff(fromVersion, toVersion int64) map[string]string {
 func (s *PolicyStore) LoadDefaults() {
 	defaults := []policy.SecurityPolicy{
 		{
-			ID: "default-allow-all", OrgID: "dev-org", Name: "Allow All (Dev)",
+			ID: "default-allow-all", OrgID: SystemThreatOrgID, Name: "Allow All (Dev)",
 			Sequence: 1000, Enabled: true, Action: "allow",
 			LogTraffic: true, LogSecurityEvents: true,
 		},
 		{
-			ID: "block-malware-domains", OrgID: "dev-org", Name: "Block Known Malware Domains",
+			ID: "block-malware-domains", OrgID: SystemThreatOrgID, Name: "Block Known Malware Domains",
 			Sequence: 10, Enabled: true, Action: "deny",
 			DNSFilterEnabled: true,
 			DNSCustomBlocklist: []string{

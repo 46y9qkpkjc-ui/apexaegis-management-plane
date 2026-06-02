@@ -6,7 +6,7 @@
 
 CREATE TABLE IF NOT EXISTS system_mgmt.policies (
     id                    VARCHAR(128) PRIMARY KEY,
-    org_id                VARCHAR(128) NOT NULL DEFAULT 'dev-org',
+    org_id                VARCHAR(128) NOT NULL DEFAULT 'a0000000-0000-0000-0000-000000000001',
     name                  VARCHAR(255) NOT NULL,
     sequence              INTEGER NOT NULL DEFAULT 0,
     enabled               BOOLEAN NOT NULL DEFAULT true,

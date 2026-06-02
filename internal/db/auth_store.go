@@ -324,6 +324,31 @@ func (s *AuthStore) IssueTokens(ctx context.Context, u *AuthUser, ipAddr, userAg
 	}, nil
 }
 
+// IssueAgentToken generates a short-lived JWT for a registered desktop agent.
+func (s *AuthStore) IssueAgentToken(orgID, deviceID string) (string, time.Time, error) {
+	now := time.Now()
+	expiresAt := now.Add(15 * time.Minute)
+	if deviceID == "" {
+		deviceID = "unknown-device"
+	}
+	claims := jwt.MapClaims{
+		"sub":       deviceID,
+		"agent_id":  deviceID,
+		"device_id": deviceID,
+		"role":      "agent",
+		"org_id":    orgID,
+		"iat":       now.Unix(),
+		"exp":       expiresAt.Unix(),
+		"iss":       "apexaegis-management-plane",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.jwtSecret)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return signed, expiresAt, nil
+}
+
 // ListUsers returns all users, optionally filtered by search query.
 func (s *AuthStore) ListUsers(ctx context.Context, search string) ([]AuthUser, error) {
 	query := `

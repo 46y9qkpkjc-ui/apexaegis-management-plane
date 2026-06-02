@@ -23,11 +23,7 @@ CREATE INDEX IF NOT EXISTS idx_profiles_type ON system_mgmt.profiles (type);
 CREATE INDEX IF NOT EXISTS idx_profiles_org_type ON system_mgmt.profiles (org_id, type);
 CREATE INDEX IF NOT EXISTS idx_profiles_sequence ON system_mgmt.profiles (type, sequence);
 
--- Trigger for updated_at
-DROP TRIGGER IF EXISTS trg_profiles_updated_at ON system_mgmt.profiles;
-CREATE TRIGGER trg_profiles_updated_at
-    BEFORE UPDATE ON system_mgmt.profiles
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
+-- updated_at is maintained explicitly by ProfileStore.
 
 -- ── Seed default profiles ────────────────────────────────────
 

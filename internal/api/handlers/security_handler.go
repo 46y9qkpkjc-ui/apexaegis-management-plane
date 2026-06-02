@@ -10,10 +10,10 @@ import (
 
 // SecurityHandler exposes the code signing, enrollment, and command signing APIs.
 type SecurityHandler struct {
-	codeSvc    *security.CodeSigningService
-	enrollSvc  *security.EnrollmentService
-	cmdSvc     *security.CommandSigningService
-	logger     *zap.Logger
+	codeSvc   *security.CodeSigningService
+	enrollSvc *security.EnrollmentService
+	cmdSvc    *security.CommandSigningService
+	logger    *zap.Logger
 }
 
 // NewSecurityHandler creates a handler with all three security services.
@@ -132,6 +132,21 @@ func (h *SecurityHandler) EnrollAgent(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, agent)
+}
+
+// EnrollDeviceCertificate registers a device and returns a signed mTLS client certificate.
+func (h *SecurityHandler) EnrollDeviceCertificate(c *gin.Context) {
+	var req security.EnrollDeviceCertificateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	resp, err := h.enrollSvc.EnrollDeviceCertificate(req)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 // ListEnrolledAgents returns all enrolled agents.

@@ -110,11 +110,15 @@ func (s *SyncService) syncAllSources(ctx context.Context) {
 		return
 	}
 
-	// TODO: In production, would need to get org list and sync per org
-	// For MVP, we use a system-wide org for threat intel
-	systemOrgID := "system" // Placeholder
+	systemOrgID := db.SystemThreatOrgID
+	systemSourceID := db.SystemThreatSourceID
 
-	count, err := s.threatStore.UpsertEntries(ctx, "abuse-ch-combined", systemOrgID, entries)
+	if err := s.threatStore.EnsureSystemSource(ctx); err != nil {
+		s.logger.Warn("system threat source unavailable, skipping scheduled sync log", zap.Error(err))
+		return
+	}
+
+	count, err := s.threatStore.UpsertEntries(ctx, systemSourceID, systemOrgID, entries)
 	if err != nil {
 		s.logger.Error("failed to upsert threat entries", zap.Error(err))
 		return
@@ -125,7 +129,7 @@ func (s *SyncService) syncAllSources(ctx context.Context) {
 	// Log sync result
 	syncLog := &db.ThreatSyncLog{
 		OrgID:           systemOrgID,
-		SourceID:        "abuse-ch-combined",
+		SourceID:        systemSourceID,
 		SyncStatus:      "success",
 		EntriesAdded:    count,
 		DurationMs:      int(duration),

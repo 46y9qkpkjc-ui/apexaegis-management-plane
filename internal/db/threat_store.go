@@ -11,56 +11,56 @@ import (
 
 // ThreatIntelSource represents a threat feed configuration
 type ThreatIntelSource struct {
-	ID                 string          `json:"id"`
-	OrgID              string          `json:"org_id"`
-	SourceType         string          `json:"source_type"`
-	Name               string          `json:"name"`
-	Endpoint           string          `json:"endpoint"`
-	AuthToken          string          `json:"auth_token,omitempty"` // encrypted
-	Enabled            bool            `json:"enabled"`
-	CategoryFilter     json.RawMessage `json:"category_filter"`
-	LastSyncAt         *time.Time      `json:"last_sync_at"`
-	LastSyncDuration   int             `json:"last_sync_duration_ms"`
-	LastSyncStatus     string          `json:"last_sync_status"`
-	ErrorMessage       string          `json:"error_message,omitempty"`
-	EntryCount         int             `json:"entry_count"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
-	CreatedBy          string          `json:"created_by"`
-	UpdatedBy          string          `json:"updated_by"`
+	ID               string          `json:"id"`
+	OrgID            string          `json:"org_id"`
+	SourceType       string          `json:"source_type"`
+	Name             string          `json:"name"`
+	Endpoint         string          `json:"endpoint"`
+	AuthToken        string          `json:"auth_token,omitempty"` // encrypted
+	Enabled          bool            `json:"enabled"`
+	CategoryFilter   json.RawMessage `json:"category_filter"`
+	LastSyncAt       *time.Time      `json:"last_sync_at"`
+	LastSyncDuration int             `json:"last_sync_duration_ms"`
+	LastSyncStatus   string          `json:"last_sync_status"`
+	ErrorMessage     string          `json:"error_message,omitempty"`
+	EntryCount       int             `json:"entry_count"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	CreatedBy        string          `json:"created_by"`
+	UpdatedBy        string          `json:"updated_by"`
 }
 
 // ThreatIntelEntry represents a single threat entry (domain, IP, URL, etc.)
 type ThreatIntelEntry struct {
-	ID             string          `json:"id"`
-	SourceID       string          `json:"source_id"`
-	OrgID          string          `json:"org_id"`
-	EntryType      string          `json:"entry_type"` // domain, ip, url, cert_hash
-	EntryValue     string          `json:"entry_value"`
-	ThreatCategory string          `json:"threat_category"`
-	ThreatLevel    string          `json:"threat_level"`
-	ConfidenceScore float64        `json:"confidence_score"`
-	Metadata       json.RawMessage `json:"metadata"`
-	CreatedAt      time.Time       `json:"created_at"`
-	ExpiresAt      time.Time       `json:"expires_at"`
-	LastUpdated    time.Time       `json:"last_updated"`
+	ID              string          `json:"id"`
+	SourceID        string          `json:"source_id"`
+	OrgID           string          `json:"org_id"`
+	EntryType       string          `json:"entry_type"` // domain, ip, url, cert_hash
+	EntryValue      string          `json:"entry_value"`
+	ThreatCategory  string          `json:"threat_category"`
+	ThreatLevel     string          `json:"threat_level"`
+	ConfidenceScore float64         `json:"confidence_score"`
+	Metadata        json.RawMessage `json:"metadata"`
+	CreatedAt       time.Time       `json:"created_at"`
+	ExpiresAt       time.Time       `json:"expires_at"`
+	LastUpdated     time.Time       `json:"last_updated"`
 }
 
 // ThreatSyncLog records sync operations
 type ThreatSyncLog struct {
-	ID               string     `json:"id"`
-	OrgID            string     `json:"org_id"`
-	SourceID         string     `json:"source_id"`
-	SyncStatus       string     `json:"sync_status"`
-	EntriesAdded     int        `json:"entries_added"`
-	EntriesUpdated   int        `json:"entries_updated"`
-	EntriesDeleted   int        `json:"entries_deleted"`
-	DurationMs       int        `json:"duration_ms"`
-	ErrorMessage     string     `json:"error_message,omitempty"`
-	TriggeredBy      string     `json:"triggered_by"`
-	SyncStartedAt    time.Time  `json:"sync_started_at"`
-	SyncCompletedAt  *time.Time `json:"sync_completed_at"`
-	CreatedAt        time.Time  `json:"created_at"`
+	ID              string     `json:"id"`
+	OrgID           string     `json:"org_id"`
+	SourceID        string     `json:"source_id"`
+	SyncStatus      string     `json:"sync_status"`
+	EntriesAdded    int        `json:"entries_added"`
+	EntriesUpdated  int        `json:"entries_updated"`
+	EntriesDeleted  int        `json:"entries_deleted"`
+	DurationMs      int        `json:"duration_ms"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	TriggeredBy     string     `json:"triggered_by"`
+	SyncStartedAt   time.Time  `json:"sync_started_at"`
+	SyncCompletedAt *time.Time `json:"sync_completed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 // ThreatStore provides CRUD operations for threat intelligence data
@@ -69,9 +69,34 @@ type ThreatStore struct {
 	logger *zap.Logger
 }
 
+const (
+	SystemThreatOrgID    = "a0000000-0000-0000-0000-000000000001"
+	SystemThreatSourceID = "c0000000-0000-0000-0000-000000000001"
+)
+
 // NewThreatStore creates a new threat store
 func NewThreatStore(db *DB, logger *zap.Logger) *ThreatStore {
 	return &ThreatStore{db: db, logger: logger}
+}
+
+// EnsureSystemSource ensures scheduled global threat intel sync has a valid
+// UUID org/source pair even on databases that predate migration 015.
+func (s *ThreatStore) EnsureSystemSource(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.threat_intel_sources (
+			id, org_id, source_type, name, endpoint, enabled, category_filter,
+			last_sync_status, created_by, updated_by
+		) VALUES (
+			$1, $2, 'abuse.ch', 'System Abuse.ch Combined', 'https://abuse.ch',
+			true, '["malware","phishing","botnet","c2"]', 'pending', 'system', 'system'
+		)
+		ON CONFLICT (id) DO NOTHING
+	`, SystemThreatSourceID, SystemThreatOrgID)
+	if err != nil {
+		s.logger.Error("failed to ensure system threat source", zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 // CreateSource creates a new threat feed source

@@ -18,9 +18,9 @@ import (
 type ThreatFetcher struct {
 	httpClient       *http.Client
 	logger           *zap.Logger
-	otxAPIKey        string        // AlienVault OTX API key (optional)
-	virustotalAPIKey string        // VirusTotal API key (required)
-	urlscanAPIKey    string        // URLScan.io API key (optional)
+	otxAPIKey        string // AlienVault OTX API key (optional)
+	virustotalAPIKey string // VirusTotal API key (required)
+	urlscanAPIKey    string // URLScan.io API key (optional)
 }
 
 // NewThreatFetcher creates a new threat fetcher with API credentials
@@ -128,8 +128,8 @@ func (f *ThreatFetcher) FetchAlienVaultOTX(ctx context.Context) ([]db.ThreatInte
 // FetchVirusTotalDomains fetches recently detected malicious domains from VirusTotal
 func (f *ThreatFetcher) FetchVirusTotalDomains(ctx context.Context) ([]db.ThreatIntelEntry, error) {
 	if f.virustotalAPIKey == "" {
-		f.logger.Warn("VirusTotal API key not configured")
-		return nil, fmt.Errorf("VirusTotal API key required")
+		f.logger.Info("VirusTotal API key not configured, skipping")
+		return nil, nil
 	}
 
 	const endpoint = "https://www.virustotal.com/api/v3/domain/objects"
@@ -161,7 +161,7 @@ func (f *ThreatFetcher) FetchVirusTotalDomains(ctx context.Context) ([]db.Threat
 			ID         string `json:"id"`
 			Attributes struct {
 				LastAnalysisStats struct {
-					Malicious int `json:"malicious"`
+					Malicious  int `json:"malicious"`
 					Suspicious int `json:"suspicious"`
 				} `json:"last_analysis_stats"`
 				Categories map[string]string `json:"categories"`
@@ -209,6 +209,11 @@ func (f *ThreatFetcher) FetchVirusTotalDomains(ctx context.Context) ([]db.Threat
 
 // FetchURLScanPhishingDomains fetches recent phishing and malware URLs from URLScan.io
 func (f *ThreatFetcher) FetchURLScanPhishingDomains(ctx context.Context) ([]db.ThreatIntelEntry, error) {
+	if f.urlscanAPIKey == "" {
+		f.logger.Info("URLScan.io API key not configured, skipping")
+		return nil, nil
+	}
+
 	// URLScan.io free API - no auth key required for searches
 	const endpoint = "https://urlscan.io/api/v1/search/"
 
@@ -221,10 +226,7 @@ func (f *ThreatFetcher) FetchURLScanPhishingDomains(ctx context.Context) ([]db.T
 	req, _ := http.NewRequestWithContext(ctx, "GET", endpoint+"?"+params.Encode(), nil)
 	req.Header.Set("User-Agent", "Apexaegis-ThreatIntel/1.0")
 
-	// Add API key if available
-	if f.urlscanAPIKey != "" {
-		req.Header.Set("API-Key", f.urlscanAPIKey)
-	}
+	req.Header.Set("API-Key", f.urlscanAPIKey)
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {

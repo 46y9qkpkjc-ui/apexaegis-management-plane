@@ -13,6 +13,7 @@ import (
 )
 
 const bearerPrefix = "Bearer "
+const defaultTenantOrgID = "a0000000-0000-0000-0000-000000000001"
 
 // RequestID injects a unique request identifier into every request for traceability.
 func RequestID() gin.HandlerFunc {
@@ -66,17 +67,6 @@ func GatewayAuth(registry gatewayRegistry) gin.HandlerFunc {
 	mtlsEnabled := os.Getenv("GATEWAY_MTLS_ENABLED") == "true"
 
 	return func(c *gin.Context) {
-		// Dev mode shortcut
-		if os.Getenv("DEPLOY_MODE") == "dev" {
-			apiKey := c.GetHeader("X-Gateway-Key")
-			if apiKey == "dev-gateway-key" {
-				c.Set("gateway_id", "dev-gateway")
-				c.Set("gateway_auth_method", "api_key")
-				c.Next()
-				return
-			}
-		}
-
 		// ── Path 1: ALB mTLS ─────────────────────────────────────────────
 		// ALB sets X-Amzn-Mtls-Clientcert-Subject after validating the cert.
 		// Format: "CN=ap-southeast-1,O=ApexAegis,OU=Gateway,C=SG"
@@ -142,8 +132,6 @@ type tokenValidator interface {
 }
 
 // JWTAuth validates JWT tokens for admin and mesh API endpoints.
-// In dev mode, it accepts a "dev-token" without validation.
-// Pass nil for validator to use dev-mode-only (accepts any token).
 func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 	var v tokenValidator
 	if len(validator) > 0 {
@@ -159,21 +147,8 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 
 		token := strings.TrimPrefix(auth, bearerPrefix)
 
-		// Dev mode only: accept static dev token
-		if token == "dev-token" && os.Getenv("DEPLOY_MODE") == "dev" {
-			c.Set("user_id", "dev-admin")
-			c.Set("org_id", "dev-org")
-			c.Set("role", "admin")
-			c.Next()
-			return
-		}
-
 		if v == nil {
-			// No validator configured — accept but set generic identity
-			c.Set("user_id", "authenticated-user")
-			c.Set("org_id", "default-org")
-			c.Set("role", "admin")
-			c.Next()
+			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
 

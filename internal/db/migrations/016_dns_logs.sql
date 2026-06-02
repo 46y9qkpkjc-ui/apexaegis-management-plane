@@ -35,18 +35,29 @@ CREATE TABLE IF NOT EXISTS system_mgmt.dns_access_logs (
     severity            VARCHAR(20) NOT NULL DEFAULT 'info',       -- Log severity: critical, high, medium, low, info
     response_time_ms    INT DEFAULT 0,                             -- Query response time in milliseconds
     response_code       INT DEFAULT 0,                             -- DNS response code (0=NOERROR, 3=NXDOMAIN, etc.)
-    created_at          TIMESTAMP NOT NULL DEFAULT now(),
-    INDEX idx_org_id ON org_id,
-    INDEX idx_gateway_id ON gateway_id,
-    INDEX idx_domain ON domain,
-    INDEX idx_client_ip ON client_ip,
-    INDEX idx_verdict ON verdict,
-    INDEX idx_created_at ON created_at,
-    INDEX idx_threat_level ON threat_level,
-    INDEX idx_action_severity ON (action, severity),
-    INDEX idx_org_domain ON (org_id, domain),
-    INDEX idx_org_client ON (org_id, client_ip)
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_dns_access_org_id
+  ON system_mgmt.dns_access_logs(org_id);
+CREATE INDEX IF NOT EXISTS idx_dns_access_gateway_id
+  ON system_mgmt.dns_access_logs(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_dns_access_domain
+  ON system_mgmt.dns_access_logs(domain);
+CREATE INDEX IF NOT EXISTS idx_dns_access_client_ip
+  ON system_mgmt.dns_access_logs(client_ip);
+CREATE INDEX IF NOT EXISTS idx_dns_access_verdict
+  ON system_mgmt.dns_access_logs(verdict);
+CREATE INDEX IF NOT EXISTS idx_dns_access_created_at
+  ON system_mgmt.dns_access_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_dns_access_threat_level
+  ON system_mgmt.dns_access_logs(threat_level);
+CREATE INDEX IF NOT EXISTS idx_dns_access_action_severity
+  ON system_mgmt.dns_access_logs(action, severity);
+CREATE INDEX IF NOT EXISTS idx_dns_access_org_domain
+  ON system_mgmt.dns_access_logs(org_id, domain);
+CREATE INDEX IF NOT EXISTS idx_dns_access_org_client
+  ON system_mgmt.dns_access_logs(org_id, client_ip);
 
 -- ============================================================================
 -- STEP 2: Create dns_error_logs table
@@ -60,12 +71,17 @@ CREATE TABLE IF NOT EXISTS system_mgmt.dns_error_logs (
     domain              VARCHAR(511) NOT NULL,
     error_type          VARCHAR(100) NOT NULL,                     -- resolution_failed, timeout, invalid_query, etc.
     error_message       TEXT,
-    created_at          TIMESTAMP NOT NULL DEFAULT now(),
-    INDEX idx_org_id ON org_id,
-    INDEX idx_gateway_id ON gateway_id,
-    INDEX idx_created_at ON created_at,
-    INDEX idx_error_type ON error_type
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_dns_error_org_id
+  ON system_mgmt.dns_error_logs(org_id);
+CREATE INDEX IF NOT EXISTS idx_dns_error_gateway_id
+  ON system_mgmt.dns_error_logs(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_dns_error_created_at
+  ON system_mgmt.dns_error_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_dns_error_error_type
+  ON system_mgmt.dns_error_logs(error_type);
 
 -- ============================================================================
 -- STEP 3: Create dns_query_stats table
@@ -75,21 +91,25 @@ CREATE TABLE IF NOT EXISTS system_mgmt.dns_query_stats (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id              UUID NOT NULL REFERENCES system_mgmt.organizations(id) ON DELETE CASCADE,
     gateway_id          VARCHAR(255) NOT NULL,
-    date                DATE NOT NULL,
+    hour_bucket         TIMESTAMPTZ NOT NULL,
     total_queries       INT DEFAULT 0,
-    blocked_queries     INT DEFAULT 0,
     allowed_queries     INT DEFAULT 0,
-    monitored_queries   INT DEFAULT 0,
-    error_queries       INT DEFAULT 0,
-    top_blocked_domain  VARCHAR(511),
-    top_threat_category VARCHAR(100),
-    avg_response_ms     INT DEFAULT 0,
-    created_at          TIMESTAMP NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMP NOT NULL DEFAULT now(),
-    UNIQUE (org_id, gateway_id, date),
-    INDEX idx_org_date ON (org_id, date),
-    INDEX idx_gateway_date ON (gateway_id, date)
+    blocked_queries     INT DEFAULT 0,
+    threat_detected     INT DEFAULT 0,
+    errors              INT DEFAULT 0,
+    avg_response_time_ms DECIMAL(10,2) DEFAULT 0,
+    max_response_time_ms INT DEFAULT 0,
+    top_domains         JSONB DEFAULT '[]',
+    top_clients         JSONB DEFAULT '[]',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (org_id, gateway_id, hour_bucket)
 );
+
+CREATE INDEX IF NOT EXISTS idx_dns_stats_org_hour
+  ON system_mgmt.dns_query_stats(org_id, hour_bucket);
+CREATE INDEX IF NOT EXISTS idx_dns_stats_gateway_hour
+  ON system_mgmt.dns_query_stats(gateway_id, hour_bucket);
 
 -- ============================================================================
 -- STEP 4: Create helper views for common queries
@@ -119,28 +139,9 @@ GROUP BY org_id, threat_category
 ORDER BY blocked_count DESC;
 
 -- ============================================================================
--- STEP 5: Create cleanup procedure for log retention
+-- STEP 5: Log retention
 -- ============================================================================
--- Deletes DNS logs older than the specified retention period
-CREATE OR REPLACE FUNCTION system_mgmt.cleanup_old_dns_logs(p_days_retain INT DEFAULT 30)
-RETURNS TABLE(deleted_access INT, deleted_errors INT) AS $$
-DECLARE
-    v_deleted_access INT;
-    v_deleted_errors INT;
-BEGIN
-    -- Delete old access logs
-    DELETE FROM system_mgmt.dns_access_logs
-    WHERE created_at < now() - make_interval(days => p_days_retain);
-    GET DIAGNOSTICS v_deleted_access = ROW_COUNT;
-
-    -- Delete old error logs
-    DELETE FROM system_mgmt.dns_error_logs
-    WHERE created_at < now() - make_interval(days => p_days_retain);
-    GET DIAGNOSTICS v_deleted_errors = ROW_COUNT;
-
-    RETURN QUERY SELECT v_deleted_access, v_deleted_errors;
-END;
-$$ LANGUAGE plpgsql;
+-- CockroachDB-safe retention cleanup is handled by DNSLogStore.DeleteOldLogs.
 
 -- ============================================================================
 -- STEP 6: Verify schema
