@@ -60,10 +60,8 @@ func NewClientConfigStore(db *DB, logger *zap.Logger) *ClientConfigStore {
 
 // Create creates a new client configuration
 func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *ClientConfigRecord) (*ClientConfigRecord, error) {
-	id := generateUUID()
 	now := time.Now()
 
-	config.ID = id
 	config.OrgID = orgID
 	config.Version = 1
 	config.CreatedAt = now
@@ -71,21 +69,21 @@ func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *Cl
 
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO system_mgmt.client_configurations (
-			id, org_id, group_id, group_name,
+			org_id, group_id, group_name,
 			tunnel_settings, features_settings, private_access_settings,
 			install_settings, tamperproof_settings,
 			session_timeout_mins, periodic_auth_mins,
 			dns_servers, allowed_protocols, gateway_priority,
-			version, created_at, updated_at, created_by, updated_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			created_by, updated_by
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id, created_at, updated_at, version
 	`,
-		id, orgID, config.GroupID, config.GroupName,
+		orgID, config.GroupID, config.GroupName,
 		config.TunnelSettings, config.FeaturesSettings, config.PrivateAccessSettings,
 		config.InstallSettings, config.TamperproofSettings,
 		config.SessionTimeoutMins, config.PeriodicAuthMins,
 		config.DNSServers, config.AllowedProtocols, config.GatewayPriority,
-		config.Version, now, now, config.CreatedBy, config.UpdatedBy,
+		config.CreatedBy, config.UpdatedBy,
 	).Scan(&config.ID, &config.CreatedAt, &config.UpdatedAt, &config.Version)
 
 	if err != nil {
@@ -94,7 +92,7 @@ func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *Cl
 	}
 
 	// Log the creation
-	s.logAudit(ctx, orgID, id, "create", config.CreatedBy, nil, config.TunnelSettings, "Client configuration created")
+	s.logAudit(ctx, orgID, config.ID, "create", config.CreatedBy, nil, config.TunnelSettings, "Client configuration created")
 
 	return config, nil
 }
@@ -315,26 +313,18 @@ func (s *ClientConfigStore) GetAuditLogs(ctx context.Context, orgID, groupID str
 
 // logAudit logs a configuration change to the audit table
 func (s *ClientConfigStore) logAudit(ctx context.Context, orgID, configID, action, changedBy string, oldValues, newValues json.RawMessage, summary string) {
-	logID := generateUUID()
 	now := time.Now()
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO system_mgmt.client_config_audit_logs (
-			id, org_id, config_id, action, changed_by, old_values, new_values,
+			org_id, config_id, action, changed_by, old_values, new_values,
 			change_summary, created_at, client_ip, user_agent
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', '')
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', '')
 	`,
-		logID, orgID, configID, action, changedBy, oldValues, newValues, summary, now,
+		orgID, configID, action, changedBy, oldValues, newValues, summary, now,
 	)
 
 	if err != nil {
 		s.logger.Error("failed to log config audit", zap.Error(err))
 	}
-}
-
-// generateUUID generates a UUID
-// In production, use github.com/google/uuid
-func generateUUID() string {
-	// Simple placeholder - should use google/uuid in production
-	return "550e8400-e29b-41d4-a716-446655440000"
 }
