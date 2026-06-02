@@ -597,6 +597,20 @@ func main() {
 		zap.Bool("urlscan_enabled", urlscanAPIKey != ""),
 	)
 
+	// ── DNS Query Logging API ──
+	dnsLogStore := db.NewDNSLogStore(dbConn, logger)
+	dnsLogsHandler := handlers.NewDNSLogsHandler(dnsLogStore, logger)
+	dnsLogsAPI := router.Group("/api/v1/admin/dns-logs")
+	dnsLogsAPI.Use(middleware.JWTAuth(authStore))
+	{
+		dnsLogsAPI.GET("", dnsLogsHandler.GetDNSLogs)
+		dnsLogsAPI.GET("/summary", dnsLogsHandler.GetDNSSummary)
+		dnsLogsAPI.GET("/stats", dnsLogsHandler.GetDNSLogsStats)
+		dnsLogsAPI.POST("/cleanup", dnsLogsHandler.DeleteOldLogs)
+	}
+
+	logger.Info("DNS logging API initialized")
+
 	// Security Validation API (container-based test infrastructure)
 	validationAPI := router.Group("/api/v1/validation")
 	validationAPI.Use(middleware.JWTAuth(authStore))
