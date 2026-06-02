@@ -544,22 +544,19 @@ func main() {
 		ghostAPI.GET("/scan/last", ghostHandler.GetLastScan)
 	}
 
-	// Client Config & Route Policy per Group API
-	clientConfigHandler := handlers.NewClientConfigHandler(logger)
-	ccAPI := router.Group("/api/v1/client-config")
-	ccAPI.Use(middleware.JWTAuth(authStore))
+	// Client Configuration API (Phase 6 Option B)
+	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
+	clientConfigHandler := handlers.NewClientConfigHandler(clientConfigStore, logger)
+	ccAdminAPI := router.Group("/api/v1/admin/client-config")
+	ccAdminAPI.Use(middleware.JWTAuth(authStore))
 	{
-		ccAPI.GET("", clientConfigHandler.ListClientConfigs)
-		ccAPI.GET("/:group_id", clientConfigHandler.GetClientConfig)
-		ccAPI.POST("", clientConfigHandler.CreateClientConfig)
-		ccAPI.PUT("/:group_id", clientConfigHandler.UpdateClientConfig)
-	}
-	routeAPI := router.Group("/api/v1/route-config")
-	routeAPI.Use(middleware.JWTAuth(authStore))
-	{
-		routeAPI.GET("", clientConfigHandler.ListRouteConfigs)
-		routeAPI.GET("/:group_id", clientConfigHandler.GetRouteConfig)
-		routeAPI.PUT("/:group_id", clientConfigHandler.UpdateRouteConfig)
+		ccAdminAPI.GET("", clientConfigHandler.ListClientConfigs)
+		ccAdminAPI.GET("/:group_id", clientConfigHandler.GetClientConfig)
+		ccAdminAPI.POST("", clientConfigHandler.CreateClientConfig)
+		ccAdminAPI.PUT("/:group_id", clientConfigHandler.UpdateClientConfig)
+		ccAdminAPI.DELETE("/:group_id", clientConfigHandler.DeleteClientConfig)
+		ccAdminAPI.GET("/audit-logs", clientConfigHandler.GetAuditLogs)
+		ccAdminAPI.POST("/validate", clientConfigHandler.ValidateConfig)
 	}
 
 	// Security Validation API (container-based test infrastructure)
