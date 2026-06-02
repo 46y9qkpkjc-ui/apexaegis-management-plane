@@ -132,13 +132,11 @@ CREATE INDEX idx_cache_stats_org ON system_mgmt.threat_intel_cache_stats(org_id)
 CREATE INDEX idx_cache_stats_updated ON system_mgmt.threat_intel_cache_stats(last_updated DESC);
 
 -- Extend policies table with threat intelligence fields
-ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS (
-  threat_intel_enabled BOOLEAN DEFAULT false,
-  threat_sources JSONB DEFAULT '["abuse.ch"]',  -- list of source names
-  threat_categories JSONB DEFAULT '["malware","phishing","botnet","c2"]',  -- filter by categories
-  threat_action VARCHAR(20) DEFAULT 'block' CHECK (threat_action IN ('block','monitor','isolate')),
-  threat_log_enabled BOOLEAN DEFAULT true
-);
+ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS threat_intel_enabled BOOLEAN DEFAULT false;
+ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS threat_sources JSONB DEFAULT '["abuse.ch"]';
+ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS threat_categories JSONB DEFAULT '["malware","phishing","botnet","c2"]';
+ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS threat_action VARCHAR(20) DEFAULT 'block' CHECK (threat_action IN ('block','monitor','isolate'));
+ALTER TABLE system_mgmt.policies ADD COLUMN IF NOT EXISTS threat_log_enabled BOOLEAN DEFAULT true;
 
 -- Trigger to update threat_intel_sources.updated_at
 CREATE OR REPLACE FUNCTION system_mgmt.update_threat_source_timestamp()
