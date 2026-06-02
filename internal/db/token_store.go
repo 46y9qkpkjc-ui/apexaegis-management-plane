@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 )
 
@@ -84,7 +84,7 @@ func (s *TokenStore) CreateToken(ctx context.Context, orgID, tokenName, createdB
 
 	// Insert token
 	var tokenID string
-	row := s.db.Pool.QueryRow(ctx, `
+	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO system_mgmt.api_tokens
 		  (org_id, name, token_value, token_prefix, created_by, expires_at, status)
 		VALUES
@@ -120,7 +120,7 @@ func (s *TokenStore) ListTokens(ctx context.Context, orgID string) ([]Token, err
 		return nil, errors.New("orgID is required")
 	}
 
-	rows, err := s.db.Pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 		  id, org_id, name, token_prefix, created_by, created_at,
 		  last_used_at, expires_at, revoked_at, status
@@ -163,7 +163,7 @@ func (s *TokenStore) RevokeToken(ctx context.Context, tokenID string) error {
 	}
 
 	var orgID string
-	err := s.db.Pool.QueryRow(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		UPDATE system_mgmt.api_tokens
 		SET revoked_at = now(), status = 'revoked'
 		WHERE id = $1 AND revoked_at IS NULL
@@ -171,7 +171,7 @@ func (s *TokenStore) RevokeToken(ctx context.Context, tokenID string) error {
 	`, tokenID).Scan(&orgID)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("token not found or already revoked")
 		}
 		s.logger.Error("failed to revoke token", zap.Error(err))
@@ -203,14 +203,14 @@ func (s *TokenStore) ValidateToken(ctx context.Context, tokenValue string) (stri
 	var revokedAt *time.Time
 	var expiresAt time.Time
 
-	err := s.db.Pool.QueryRow(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT org_id, revoked_at, expires_at
 		FROM system_mgmt.api_tokens
 		WHERE token_value = $1
 	`, tokenHash).Scan(&orgID, &revokedAt, &expiresAt)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return "", errors.New("invalid token")
 		}
 		s.logger.Error("failed to validate token", zap.Error(err))
@@ -227,9 +227,9 @@ func (s *TokenStore) ValidateToken(ctx context.Context, tokenValue string) (stri
 		return "", errors.New("token has expired")
 	}
 
-	// Update last_used_at
+	// Update last_used_at (fire and forget)
 	go func() {
-		_ = s.db.Pool.QueryRow(context.Background(), `
+		_, _ = s.db.ExecContext(context.Background(), `
 			UPDATE system_mgmt.api_tokens
 			SET last_used_at = now()
 			WHERE token_value = $1
@@ -245,15 +245,16 @@ func (s *TokenStore) GetDeploymentInfo(ctx context.Context, orgID string) (*Depl
 		return nil, errors.New("orgID is required")
 	}
 
-	var org Organization
-	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id, subscription_licenses, licenses_consumed
+	var id string
+	var subscriptionLicenses, licensesConsumed int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, COALESCE(subscription_licenses, 0), COALESCE(licenses_consumed, 0)
 		FROM system_mgmt.organizations
 		WHERE id = $1
-	`, orgID).Scan(&org.ID, &org.SubscriptionLicenses, &org.LicensesConsumed)
+	`, orgID).Scan(&id, &subscriptionLicenses, &licensesConsumed)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("organization not found")
 		}
 		s.logger.Error("failed to get deployment info", zap.Error(err))
@@ -261,17 +262,17 @@ func (s *TokenStore) GetDeploymentInfo(ctx context.Context, orgID string) (*Depl
 	}
 
 	return &DeploymentInfo{
-		OrgID:                org.ID,
-		TenantID:             org.ID, // For now, TenantID == OrgID (can be extended for multi-tenancy)
-		SubscriptionLicenses: org.SubscriptionLicenses,
-		LicensesConsumed:     org.LicensesConsumed,
-		LicensesAvailable:    org.SubscriptionLicenses - org.LicensesConsumed,
+		OrgID:                id,
+		TenantID:             id, // For now, TenantID == OrgID (can be extended for multi-tenancy)
+		SubscriptionLicenses: subscriptionLicenses,
+		LicensesConsumed:     licensesConsumed,
+		LicensesAvailable:    subscriptionLicenses - licensesConsumed,
 	}, nil
 }
 
 // incrementLicenseUsage adds or subtracts license count (delta can be negative for revocation)
 func (s *TokenStore) incrementLicenseUsage(ctx context.Context, orgID string, delta int) error {
-	_, err := s.db.Pool.Exec(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE system_mgmt.organizations
 		SET licenses_consumed = licenses_consumed + $2
 		WHERE id = $1 AND (licenses_consumed + $2) >= 0
@@ -297,14 +298,14 @@ func (s *TokenStore) GetOrganization(ctx context.Context, orgID string) (*struct
 		LicensesConsumed     int
 	}
 
-	err := s.db.Pool.QueryRow(ctx, `
+	err := s.db.QueryRowContext(ctx, `
 		SELECT id, COALESCE(subscription_licenses, 0), COALESCE(licenses_consumed, 0)
 		FROM system_mgmt.organizations
 		WHERE id = $1
 	`, orgID).Scan(&org.ID, &org.SubscriptionLicenses, &org.LicensesConsumed)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("organization not found")
 		}
 		return nil, fmt.Errorf("failed to get organization: %w", err)

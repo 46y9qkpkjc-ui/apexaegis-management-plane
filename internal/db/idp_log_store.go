@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 )
 
@@ -53,7 +52,7 @@ func (s *IdPLogStore) LogEvent(ctx context.Context, orgID, idPID, eventType, pro
 	oldValuesJSON, _ := json.Marshal(opts.OldValues)
 	newValuesJSON, _ := json.Marshal(opts.NewValues)
 
-	_, err := s.db.Pool.Exec(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		SELECT system_mgmt.log_idp_event(
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 		)
@@ -100,7 +99,7 @@ func (s *IdPLogStore) GetLogs(ctx context.Context, orgID string, filters LogFilt
 	}
 
 	// Use helper function with filters
-	rows, err := s.db.Pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			id, idp_id, provider_type, provider_name, event_type,
 			action_by, status, test_result, error_message, action_timestamp
@@ -159,7 +158,7 @@ func (s *IdPLogStore) GetLogSummary(ctx context.Context, orgID string) (map[stri
 	summary := make(map[string]interface{})
 
 	// Get count by provider type
-	rows, err := s.db.Pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			provider_type,
 			COUNT(*) as total_events,

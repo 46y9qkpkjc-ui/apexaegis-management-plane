@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"apexaegis/internal/db"
+	"github.com/zcp/management-plane/internal/db"
 )
 
 // TokenHandler handles API token management endpoints

@@ -151,6 +151,9 @@ func main() {
 	idpStore := db.NewIdPStore(dbConn, logger)
 	idBroker.SetPersister(idpStore)
 
+	// ── IdP Configuration Logging (audit trail for IdP changes) ──
+	idpLogStore := db.NewIdPLogStore(dbConn, logger)
+
 	// ── SDN whitebox switch manager ──
 	sdnManager := sdn.NewManager(logger)
 
@@ -393,6 +396,16 @@ func main() {
 		adminAPI.GET("/tokens", tokenHandler.ListTokens)
 		adminAPI.DELETE("/tokens/:id", tokenHandler.RevokeToken)
 		adminAPI.GET("/organization/deployment-info", tokenHandler.GetDeploymentInfo)
+
+		// IdP Configuration Logging (audit trail for IdP integration changes)
+		idpLogsHandler := handlers.NewIdPLogsHandler(idpLogStore, logger)
+		adminAPI.GET("/idp/logs", idpLogsHandler.GetIdPLogs)
+		adminAPI.GET("/idp/logs/summary", idpLogsHandler.GetIdPLogSummary)
+		adminAPI.GET("/idp/logs/provider/:provider_type", idpLogsHandler.GetProviderLogs)
+
+		// IdP Test Connection (validate IdP connectivity before saving)
+		idpTestHandler := handlers.NewIdPTestHandler(idpStore, idpLogStore, idBroker, logger)
+		adminAPI.POST("/idp/:id/test", idpTestHandler.TestConnection)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
