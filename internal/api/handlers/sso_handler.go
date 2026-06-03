@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type SSOHandler struct {
 type pendingAuth struct {
 	IdPID       string
 	RedirectURI string
+	CallbackURI string
 	CreatedAt   time.Time
 }
 
@@ -82,21 +84,15 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 	}
 	state := base64.RawURLEncoding.EncodeToString(stateBytes)
 
-	// Determine redirect URI — caller can override, default to web-ui callback
-	redirectURI := c.Query("redirect_uri")
-	if redirectURI == "" {
-		redirectURI = c.Query("origin")
-		if redirectURI == "" {
-			redirectURI = fmt.Sprintf("%s://%s", scheme(c), c.Request.Host)
-		}
-		redirectURI += "/login?sso_callback=1"
-	}
+	redirectURI := webLoginURL(c)
+	callbackURI := callbackURL(c)
 
 	// Store pending state
 	h.mu.Lock()
 	h.pending[state] = &pendingAuth{
 		IdPID:       idpID,
 		RedirectURI: redirectURI,
+		CallbackURI: callbackURI,
 		CreatedAt:   time.Now(),
 	}
 	h.mu.Unlock()
@@ -114,7 +110,7 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 		"client_id":     {idp.ClientID},
 		"response_type": {"code"},
 		"scope":         {strings.Join(scopes, " ")},
-		"redirect_uri":  {callbackURL(c)},
+		"redirect_uri":  {callbackURI},
 		"state":         {state},
 	}
 
@@ -143,13 +139,23 @@ func (h *SSOHandler) CallbackRedirect(c *gin.Context) {
 		return
 	}
 
-	dest := url.URL{
-		Path: "/login",
-		RawQuery: url.Values{
-			"code":  {code},
-			"state": {state},
-		}.Encode(),
+	h.mu.Lock()
+	pending, ok := h.pending[state]
+	h.mu.Unlock()
+	if !ok || time.Since(pending.CreatedAt) > 10*time.Minute {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired state parameter"})
+		return
 	}
+
+	dest, err := url.Parse(pending.RedirectURI)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect target"})
+		return
+	}
+	query := dest.Query()
+	query.Set("code", code)
+	query.Set("state", state)
+	dest.RawQuery = query.Encode()
 	c.Redirect(http.StatusFound, dest.String())
 }
 
@@ -194,7 +200,7 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 
 	// Exchange code for tokens at IdP token endpoint
 	tokenEndpoint := resolveTokenEndpoint(idp)
-	tokenResp, err := h.exchangeCode(c.Request.Context(), idp, tokenEndpoint, req.Code, callbackURL(c))
+	tokenResp, err := h.exchangeCode(c.Request.Context(), idp, tokenEndpoint, req.Code, pending.CallbackURI)
 	if err != nil {
 		h.logger.Error("Token exchange failed", zap.String("idp", idp.Name), zap.Error(err))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "token exchange failed"})
@@ -354,25 +360,43 @@ func resolveTokenEndpoint(idp *identity.IdPConfig) string {
 }
 
 func callbackURL(c *gin.Context) string {
-	// In dev the browser hits Next.js on :3000 which proxies to :9090,
-	// so c.Request.Host is :9090 — not reachable by the browser.
-	// Prefer the Origin header (set by the frontend fetch) to build a
-	// redirect URI the browser can actually follow.
 	const path = "/api/v1/auth/sso/callback"
-	if origin := c.GetHeader("Origin"); origin != "" {
-		return origin + path
+	if base := publicAPIBaseURL(); base != "" {
+		return strings.TrimRight(base, "/") + path
 	}
-	// Browsers may omit Origin on same-origin GET; fall back to Referer.
-	if referer := c.GetHeader("Referer"); referer != "" {
-		if u, err := url.Parse(referer); err == nil {
-			return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, path)
-		}
-	}
-	// Next.js / nginx may set X-Forwarded-Host.
 	if fwdHost := c.GetHeader("X-Forwarded-Host"); fwdHost != "" {
 		return fmt.Sprintf("%s://%s%s", scheme(c), fwdHost, path)
 	}
 	return fmt.Sprintf("%s://%s%s", scheme(c), c.Request.Host, path)
+}
+
+func publicAPIBaseURL() string {
+	for _, key := range []string{"PUBLIC_API_URL", "API_PUBLIC_BASE_URL", "MANAGEMENT_PUBLIC_URL"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	if os.Getenv("DEPLOY_MODE") == "cloud" {
+		return "https://api.apexaegis.app"
+	}
+	return ""
+}
+
+func webLoginURL(c *gin.Context) string {
+	base := strings.TrimRight(c.Query("origin"), "/")
+	if base == "" {
+		base = strings.TrimRight(c.GetHeader("Origin"), "/")
+	}
+	if base == "" {
+		base = strings.TrimRight(os.Getenv("WEB_UI_PUBLIC_URL"), "/")
+	}
+	if base == "" && os.Getenv("DEPLOY_MODE") == "cloud" {
+		base = "https://www.apexaegis.app"
+	}
+	if base == "" {
+		base = fmt.Sprintf("%s://%s", scheme(c), c.Request.Host)
+	}
+	return base + "/login"
 }
 
 func scheme(c *gin.Context) string {
