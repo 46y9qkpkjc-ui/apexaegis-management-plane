@@ -227,6 +227,7 @@ func main() {
 	router.Use(middleware.RequestID())
 	router.Use(middleware.SafeRecovery())
 	router.Use(middleware.ErrorHandler())
+	router.Use(middleware.SecurityHeaders())
 	router.Use(middleware.CORS())
 
 	// Public health endpoints

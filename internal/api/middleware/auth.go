@@ -33,23 +33,60 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// CORS sets permissive CORS headers for the management dashboard.
+// CORS only allows known Web UI origins to call browser-facing management APIs.
 func CORS() gin.HandlerFunc {
+	allowedOrigins := allowedWebOrigins()
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		if origin == "" {
-			origin = "*"
+		if origin != "" {
+			if !allowedOrigins[origin] {
+				c.AbortWithStatus(http.StatusForbidden)
+				return
+			}
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Credentials", "false")
 		}
-		c.Header("Access-Control-Allow-Origin", origin)
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gateway-Key, X-Request-ID, X-ApexAegis-Tenant-ID, X-Tenant-ID")
-		c.Header("Access-Control-Allow-Credentials", "true")
 		c.Header("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
+		c.Next()
+	}
+}
+
+func allowedWebOrigins() map[string]bool {
+	origins := map[string]bool{
+		"https://www.apexaegis.app": true,
+		"https://apexaegis.app":     true,
+	}
+	if extra := os.Getenv("WEB_UI_ALLOWED_ORIGINS"); extra != "" {
+		for _, origin := range strings.Split(extra, ",") {
+			origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+			if origin != "" {
+				origins[origin] = true
+			}
+		}
+	}
+	if os.Getenv("DEPLOY_MODE") != "cloud" {
+		origins["http://localhost:3000"] = true
+		origins["http://127.0.0.1:3000"] = true
+		origins["http://localhost:3001"] = true
+		origins["http://127.0.0.1:3001"] = true
+	}
+	return origins
+}
+
+// SecurityHeaders adds browser security headers for public REST responses.
+func SecurityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		c.Next()
 	}
 }

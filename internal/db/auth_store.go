@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
+
+const dummyBcryptHash = "$2a$12$vOYL1ctN71LpjemdG8.qJe4.QgZcgHiNANJWF.oLETDxkqhYPJBAm"
 
 // AuthUser represents a user row for authentication.
 type AuthUser struct {
@@ -52,6 +55,12 @@ func NewAuthStore(db *DB, jwtSecret []byte, logger *zap.Logger) *AuthStore {
 
 // Authenticate validates email + password and returns tokens on success.
 func (s *AuthStore) Authenticate(ctx context.Context, email, password, ipAddr, userAgent string) (*LoginResult, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	password = strings.TrimSpace(password)
+	if email == "" || password == "" || len(email) > 320 || len(password) > 256 {
+		return nil, errors.New("invalid email or password")
+	}
+
 	var u AuthUser
 	var passwordHash sql.NullString
 
@@ -62,6 +71,7 @@ func (s *AuthStore) Authenticate(ctx context.Context, email, password, ipAddr, u
 	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status, &passwordHash)
 
 	if errors.Is(err, sql.ErrNoRows) {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
 		return nil, errors.New("invalid email or password")
 	}
 	if err != nil {
