@@ -643,6 +643,96 @@ func (s *SCIMStore) ListGroups(ctx context.Context, filter string, startIndex, c
 	return groups, total, rows.Err()
 }
 
+// ListGroupsForOrg returns tenant-scoped groups for the management Web UI.
+func (s *SCIMStore) ListGroupsForOrg(ctx context.Context, orgID, filter string, startIndex, count int) ([]SCIMGroup, int, error) {
+	if orgID == "" {
+		return nil, 0, errors.New("orgID is required")
+	}
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	if count < 1 || count > 500 {
+		count = 100
+	}
+
+	args := []interface{}{orgID}
+	where := `WHERE org_id = $1`
+	if filter != "" {
+		args = append(args, "%"+filter+"%")
+		where += ` AND display_name ILIKE $2`
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_mgmt.groups `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("list tenant groups count: %w", err)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, org_id, display_name, COALESCE(external_id, ''),
+		       COALESCE(idp_id, ''), source, created_at, updated_at
+		  FROM system_mgmt.groups
+		  %s
+		 ORDER BY created_at DESC
+		 LIMIT %d OFFSET %d
+	`, where, count, startIndex-1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tenant groups: %w", err)
+	}
+	defer rows.Close()
+
+	groups := []SCIMGroup{}
+	for rows.Next() {
+		var g SCIMGroup
+		if err := rows.Scan(&g.ID, &g.OrgID, &g.DisplayName, &g.ExternalID,
+			&g.IdPID, &g.Source, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan tenant group: %w", err)
+		}
+		g.Members, err = s.getGroupMembers(ctx, g.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, total, rows.Err()
+}
+
+// UpdateGroupForOrg updates a tenant-scoped local or SCIM group display name.
+func (s *SCIMStore) UpdateGroupForOrg(ctx context.Context, orgID, id, displayName string) (*SCIMGroup, error) {
+	var updated SCIMGroup
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE system_mgmt.groups
+		   SET display_name = $3, updated_at = now()
+		 WHERE id = $1 AND org_id = $2
+		 RETURNING id, org_id, display_name, COALESCE(external_id, ''),
+		           COALESCE(idp_id, ''), source, created_at, updated_at
+	`, id, orgID, displayName).Scan(
+		&updated.ID, &updated.OrgID, &updated.DisplayName, &updated.ExternalID,
+		&updated.IdPID, &updated.Source, &updated.CreatedAt, &updated.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("group not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update tenant group: %w", err)
+	}
+	updated.Members, err = s.getGroupMembers(ctx, updated.ID)
+	return &updated, err
+}
+
+// DeleteGroupForOrg removes a tenant-scoped group.
+func (s *SCIMStore) DeleteGroupForOrg(ctx context.Context, orgID, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM system_mgmt.groups WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return fmt.Errorf("delete tenant group: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return errors.New("group not found")
+	}
+	return nil
+}
+
 // ClassifyGroupMemberIDs validates SCIM member IDs within a tenant.
 func (s *SCIMStore) ClassifyGroupMemberIDs(ctx context.Context, orgID string, memberIDs []string) (adminIDs, clientIDs []string, err error) {
 	adminIDs = make([]string, 0, len(memberIDs))

@@ -303,6 +303,18 @@ func main() {
 		deviceAPI.GET("", deviceHandler.ListDevices)
 	}
 
+	// Group Inventory API (admin-only — includes SCIM-pushed groups)
+	groupAPI := router.Group("/api/v1/groups")
+	groupAPI.Use(middleware.JWTAuth(authStore))
+	groupAPI.Use(middleware.RequireWriteAccess())
+	{
+		groupHandler := handlers.NewGroupHandler(scimStore, logger)
+		groupAPI.GET("", groupHandler.ListGroups)
+		groupAPI.POST("", groupHandler.CreateGroup)
+		groupAPI.PUT("/:id", groupHandler.UpdateGroup)
+		groupAPI.DELETE("/:id", groupHandler.DeleteGroup)
+	}
+
 	// SCIM 2.0 provisioning API (RFC 7644 — bearer token auth from IdPs)
 	scimAPI := router.Group("/scim/v2")
 	scimAPI.Use(middleware.SCIMContentType())
