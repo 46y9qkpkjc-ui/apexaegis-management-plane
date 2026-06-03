@@ -503,23 +503,4 @@ CREATE TABLE IF NOT EXISTS system_mgmt.policy_deployments (
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
--- Triggers (idempotent: drop + re-create for CockroachDB compatibility)
-DROP TRIGGER IF EXISTS trg_security_policies_updated_at ON system_mgmt.security_policies;
-CREATE TRIGGER trg_security_policies_updated_at
-    BEFORE UPDATE ON system_mgmt.security_policies
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
-
-DROP TRIGGER IF EXISTS trg_ssl_profiles_updated_at ON system_mgmt.ssl_profiles;
-CREATE TRIGGER trg_ssl_profiles_updated_at
-    BEFORE UPDATE ON system_mgmt.ssl_profiles
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
-
-DROP TRIGGER IF EXISTS trg_devices_updated_at ON system_mgmt.devices;
-CREATE TRIGGER trg_devices_updated_at
-    BEFORE UPDATE ON system_mgmt.devices
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
-
-DROP TRIGGER IF EXISTS trg_atp_profiles_updated_at ON system_mgmt.atp_profiles;
-CREATE TRIGGER trg_atp_profiles_updated_at
-    BEFORE UPDATE ON system_mgmt.atp_profiles
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
+-- updated_at is maintained explicitly by the application stores.

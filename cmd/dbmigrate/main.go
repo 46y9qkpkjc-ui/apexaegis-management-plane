@@ -27,7 +27,12 @@ func main() {
 		migrationsDir = "internal/db/migrations"
 	}
 
-	dbConn, err := db.Open(db.Config{DSN: databaseURL}, logger)
+	tenantOrgID := os.Getenv("APP_TENANT_ORG_ID")
+	if tenantOrgID == "" {
+		tenantOrgID = db.SystemThreatOrgID
+	}
+
+	dbConn, err := db.Open(db.Config{DSN: databaseURL, TenantOrgID: tenantOrgID}, logger)
 	if err != nil {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}

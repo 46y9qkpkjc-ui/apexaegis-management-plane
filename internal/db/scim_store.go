@@ -480,6 +480,54 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 	return &u, true, nil
 }
 
+// FindAndLinkProvisionedClientUser resolves an existing SCIM client user and
+// links its OIDC subject. It never creates a user, making it suitable for the
+// self-service portal where SCIM provisioning is required before access.
+func (s *SCIMStore) FindAndLinkProvisionedClientUser(ctx context.Context, provider, subject, email, orgID string) (*SCIMUser, error) {
+	var u SCIMUser
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, org_id, email, name,
+		       COALESCE(department, ''), COALESCE(title, ''),
+		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
+		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
+		       status, created_at, updated_at
+		  FROM system_mgmt.client_users
+		 WHERE org_id = $1
+		   AND (
+		     (oauth_provider = $2 AND oauth_subject = $3)
+		     OR lower(email) = lower($4)
+		   )
+		 ORDER BY CASE WHEN oauth_provider = $2 AND oauth_subject = $3 THEN 0 ELSE 1 END
+		 LIMIT 1
+	`, orgID, provider, subject, email).Scan(
+		&u.ID, &u.OrgID, &u.Email, &u.Name,
+		&u.Department, &u.Title,
+		&u.OAuthProvider, &u.OAuthSubject,
+		&u.SCIMExternalID, &u.IdPID,
+		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("user is not provisioned for the ApexAegis user portal")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find provisioned client user: %w", err)
+	}
+	if u.OAuthProvider != provider || u.OAuthSubject != subject {
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE system_mgmt.client_users
+			   SET oauth_provider = $1, oauth_subject = $2, last_login_at = now()
+			 WHERE id = $3
+		`, provider, subject, u.ID); err != nil {
+			return nil, fmt.Errorf("link provisioned client user: %w", err)
+		}
+		u.OAuthProvider = provider
+		u.OAuthSubject = subject
+	} else {
+		_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.client_users SET last_login_at = now() WHERE id = $1`, u.ID)
+	}
+	return &u, nil
+}
+
 // ─── Groups ─────────────────────────────────────────────────────────
 
 // CreateGroup creates a new group (via SCIM or locally).
@@ -545,7 +593,10 @@ func (s *SCIMStore) GetGroupBySCIMID(ctx context.Context, externalID string) (*S
 	if err != nil {
 		return nil, fmt.Errorf("scim get group by ext: %w", err)
 	}
-	g.Members, _ = s.getGroupMembers(ctx, g.ID)
+	g.Members, err = s.getGroupMembers(ctx, g.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &g, nil
 }
 
@@ -568,7 +619,10 @@ func (s *SCIMStore) UpdateGroup(ctx context.Context, id string, g *SCIMGroup) (*
 	if err != nil {
 		return nil, fmt.Errorf("scim update group: %w", err)
 	}
-	updated.Members, _ = s.getGroupMembers(ctx, updated.ID)
+	updated.Members, err = s.getGroupMembers(ctx, updated.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &updated, nil
 }
 
@@ -628,10 +682,155 @@ func (s *SCIMStore) ListGroups(ctx context.Context, filter string, startIndex, c
 			&g.IdPID, &g.Source, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scim scan group: %w", err)
 		}
-		g.Members, _ = s.getGroupMembers(ctx, g.ID)
+		g.Members, err = s.getGroupMembers(ctx, g.ID)
+		if err != nil {
+			return nil, 0, err
+		}
 		groups = append(groups, g)
 	}
 	return groups, total, rows.Err()
+}
+
+// ListGroupsForOrg returns tenant-scoped groups for the management Web UI.
+func (s *SCIMStore) ListGroupsForOrg(ctx context.Context, orgID, filter string, startIndex, count int) ([]SCIMGroup, int, error) {
+	if orgID == "" {
+		return nil, 0, errors.New("orgID is required")
+	}
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	if count < 1 || count > 500 {
+		count = 100
+	}
+
+	args := []interface{}{orgID}
+	where := `WHERE org_id = $1`
+	if filter != "" {
+		args = append(args, "%"+filter+"%")
+		where += ` AND display_name ILIKE $2`
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_mgmt.groups `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("list tenant groups count: %w", err)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, org_id, display_name, COALESCE(external_id, ''),
+		       COALESCE(idp_id, ''), source, created_at, updated_at
+		  FROM system_mgmt.groups
+		  %s
+		 ORDER BY created_at DESC
+		 LIMIT %d OFFSET %d
+	`, where, count, startIndex-1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tenant groups: %w", err)
+	}
+	defer rows.Close()
+
+	groups := []SCIMGroup{}
+	for rows.Next() {
+		var g SCIMGroup
+		if err := rows.Scan(&g.ID, &g.OrgID, &g.DisplayName, &g.ExternalID,
+			&g.IdPID, &g.Source, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan tenant group: %w", err)
+		}
+		g.Members, err = s.getGroupMembers(ctx, g.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, total, rows.Err()
+}
+
+// UpdateGroupForOrg updates a tenant-scoped local or SCIM group display name.
+func (s *SCIMStore) UpdateGroupForOrg(ctx context.Context, orgID, id, displayName string) (*SCIMGroup, error) {
+	var updated SCIMGroup
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE system_mgmt.groups
+		   SET display_name = $3, updated_at = now()
+		 WHERE id = $1 AND org_id = $2
+		 RETURNING id, org_id, display_name, COALESCE(external_id, ''),
+		           COALESCE(idp_id, ''), source, created_at, updated_at
+	`, id, orgID, displayName).Scan(
+		&updated.ID, &updated.OrgID, &updated.DisplayName, &updated.ExternalID,
+		&updated.IdPID, &updated.Source, &updated.CreatedAt, &updated.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("group not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update tenant group: %w", err)
+	}
+	updated.Members, err = s.getGroupMembers(ctx, updated.ID)
+	return &updated, err
+}
+
+// DeleteGroupForOrg removes a tenant-scoped group.
+func (s *SCIMStore) DeleteGroupForOrg(ctx context.Context, orgID, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM system_mgmt.groups WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return fmt.Errorf("delete tenant group: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return errors.New("group not found")
+	}
+	return nil
+}
+
+// ClassifyGroupMemberIDs validates SCIM member IDs within a tenant.
+func (s *SCIMStore) ClassifyGroupMemberIDs(ctx context.Context, orgID string, memberIDs []string) (adminIDs, clientIDs []string, err error) {
+	adminIDs = make([]string, 0, len(memberIDs))
+	clientIDs = make([]string, 0, len(memberIDs))
+	seen := make(map[string]bool, len(memberIDs))
+	for _, id := range memberIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		var exists bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM system_mgmt.users WHERE id = $1 AND org_id = $2)`,
+			id, orgID,
+		).Scan(&exists); err != nil {
+			return nil, nil, fmt.Errorf("classify admin group member: %w", err)
+		}
+		if exists {
+			adminIDs = append(adminIDs, id)
+			continue
+		}
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM system_mgmt.client_users WHERE id = $1 AND org_id = $2)`,
+			id, orgID,
+		).Scan(&exists); err != nil {
+			return nil, nil, fmt.Errorf("classify client group member: %w", err)
+		}
+		if !exists {
+			return nil, nil, fmt.Errorf("group member %s was not found in this tenant", id)
+		}
+		clientIDs = append(clientIDs, id)
+	}
+	return adminIDs, clientIDs, nil
+}
+
+// SetGroupMemberIDs validates and classifies SCIM member IDs before replacing memberships.
+func (s *SCIMStore) SetGroupMemberIDs(ctx context.Context, groupID string, memberIDs []string) error {
+	group, err := s.GetGroup(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	if group == nil {
+		return errors.New("group not found")
+	}
+	adminIDs, clientIDs, err := s.ClassifyGroupMemberIDs(ctx, group.OrgID, memberIDs)
+	if err != nil {
+		return err
+	}
+	return s.SetGroupMembers(ctx, groupID, adminIDs, clientIDs)
 }
 
 // SetGroupMembers replaces all members of a group. memberIDs can be admin or client user IDs.

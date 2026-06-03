@@ -40,8 +40,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_client_users_oauth
 CREATE INDEX IF NOT EXISTS idx_client_users_scim_ext
     ON system_mgmt.client_users (scim_external_id) WHERE scim_external_id IS NOT NULL;
 
-CREATE TRIGGER trg_client_users_updated_at BEFORE UPDATE ON system_mgmt.client_users
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
+-- updated_at is maintained explicitly by SCIMStore.
 
 -- ── Groups (synced from IdPs via SCIM or created locally) ─────────
 

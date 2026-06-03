@@ -362,12 +362,12 @@ func (s *Store) LoadDefaults() {
 
 	defaults := []SecurityPolicy{
 		{
-			ID: "default-allow-all", OrgID: "dev-org", Name: "Allow All (Dev)",
+			ID: "default-allow-all", OrgID: "a0000000-0000-0000-0000-000000000001", Name: "Allow All (Dev)",
 			Sequence: 1000, Enabled: true, Action: "allow",
 			LogTraffic: true, LogSecurityEvents: true,
 		},
 		{
-			ID: "block-malware-domains", OrgID: "dev-org", Name: "Block Known Malware Domains",
+			ID: "block-malware-domains", OrgID: "a0000000-0000-0000-0000-000000000001", Name: "Block Known Malware Domains",
 			Sequence: 10, Enabled: true, Action: "deny",
 			DNSFilterEnabled: true,
 			DNSCustomBlocklist: []string{

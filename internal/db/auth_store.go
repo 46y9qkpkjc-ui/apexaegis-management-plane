@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
+
+const dummyBcryptHash = "$2a$12$vOYL1ctN71LpjemdG8.qJe4.QgZcgHiNANJWF.oLETDxkqhYPJBAm"
 
 // AuthUser represents a user row for authentication.
 type AuthUser struct {
@@ -37,6 +40,13 @@ type LoginResult struct {
 	User         AuthUser `json:"user"`
 }
 
+// PortalLoginResult is returned for SCIM client-user portal sessions.
+type PortalLoginResult struct {
+	AccessToken string   `json:"access_token"`
+	ExpiresIn   int64    `json:"expires_in"`
+	User        SCIMUser `json:"user"`
+}
+
 // AuthStore handles user authentication against CockroachDB Cloud.
 type AuthStore struct {
 	db        *DB
@@ -52,6 +62,12 @@ func NewAuthStore(db *DB, jwtSecret []byte, logger *zap.Logger) *AuthStore {
 
 // Authenticate validates email + password and returns tokens on success.
 func (s *AuthStore) Authenticate(ctx context.Context, email, password, ipAddr, userAgent string) (*LoginResult, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	password = strings.TrimSpace(password)
+	if email == "" || password == "" || len(email) > 320 || len(password) > 256 {
+		return nil, errors.New("invalid email or password")
+	}
+
 	var u AuthUser
 	var passwordHash sql.NullString
 
@@ -62,6 +78,7 @@ func (s *AuthStore) Authenticate(ctx context.Context, email, password, ipAddr, u
 	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status, &passwordHash)
 
 	if errors.Is(err, sql.ErrNoRows) {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
 		return nil, errors.New("invalid email or password")
 	}
 	if err != nil {
@@ -322,6 +339,60 @@ func (s *AuthStore) IssueTokens(ctx context.Context, u *AuthUser, ipAddr, userAg
 		ExpiresIn:    900,
 		User:         *u,
 	}, nil
+}
+
+// IssueAgentToken generates a short-lived JWT bound to a registered device
+// certificate. Gateways compare these claims with the verified TLS peer cert.
+func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string) (string, time.Time, error) {
+	now := time.Now()
+	expiresAt := now.Add(15 * time.Minute)
+	if deviceID == "" {
+		deviceID = "unknown-device"
+	}
+	if strings.TrimSpace(certFingerprintSHA256) == "" || strings.TrimSpace(certSerial) == "" {
+		return "", time.Time{}, errors.New("device certificate identity is required")
+	}
+	claims := jwt.MapClaims{
+		"sub":                            deviceID,
+		"agent_id":                       deviceID,
+		"device_id":                      deviceID,
+		"device_cert_fingerprint_sha256": certFingerprintSHA256,
+		"device_cert_serial":             certSerial,
+		"role":                           "agent",
+		"org_id":                         orgID,
+		"iat":                            now.Unix(),
+		"exp":                            expiresAt.Unix(),
+		"iss":                            "apexaegis-management-plane",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.jwtSecret)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return signed, expiresAt, nil
+}
+
+// IssuePortalToken generates a short-lived token for a SCIM-provisioned client
+// user. Portal tokens are intentionally not backed by administrator sessions.
+func (s *AuthStore) IssuePortalToken(u *SCIMUser) (*PortalLoginResult, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"sub":    u.ID,
+		"email":  u.Email,
+		"name":   u.Name,
+		"role":   "client_user",
+		"aud":    "apexaegis-user-portal",
+		"org_id": u.OrgID,
+		"iat":    now.Unix(),
+		"exp":    now.Add(15 * time.Minute).Unix(),
+		"iss":    "apexaegis-management-plane",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.jwtSecret)
+	if err != nil {
+		return nil, errors.New("token generation failed")
+	}
+	return &PortalLoginResult{AccessToken: signed, ExpiresIn: 900, User: *u}, nil
 }
 
 // ListUsers returns all users, optionally filtered by search query.

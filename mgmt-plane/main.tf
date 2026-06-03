@@ -32,8 +32,32 @@ variable "domain" {
   default = "api.apexaegis.app"
 }
 
+variable "gateway_domain" {
+  description = "Gateway-only gRPC control-plane hostname. This is separate from the public API hostname but still uses port 443."
+  type        = string
+  default     = "gateway-api.apexaegis.app"
+}
+
+variable "device_domain" {
+  description = "Desktop/mobile client REST hostname. This listener requires device mTLS and still uses port 443."
+  type        = string
+  default     = "device-api.apexaegis.app"
+}
+
 variable "acm_certificate_arn" {
   description = "ARN of the ACM certificate for api.apexaegis.app (must be in ap-southeast-1)"
+}
+
+variable "gateway_acm_certificate_arn" {
+  description = "Optional ACM certificate ARN for gateway_domain. Leave empty when acm_certificate_arn covers both hostnames."
+  type        = string
+  default     = ""
+}
+
+variable "device_acm_certificate_arn" {
+  description = "Optional ACM certificate ARN for device_domain. Leave empty when acm_certificate_arn covers both hostnames."
+  type        = string
+  default     = ""
 }
 
 variable "database_url" {
@@ -49,6 +73,12 @@ variable "jwt_secret" {
 variable "gateway_api_key" {
   description = "Shared API key for gateway authentication"
   sensitive   = true
+}
+
+variable "tenant_org_id" {
+  description = "Tenant organization UUID enforced by CockroachDB row-level security"
+  type        = string
+  default     = "a0000000-0000-0000-0000-000000000001"
 }
 
 variable "vault_passphrase" {
@@ -73,9 +103,42 @@ variable "desired_count" {
 }
 
 variable "gateway_trust_store_arn" {
-  description = "ALB trust store ARN from pca/ workspace — used for mTLS with gateways"
+  description = "ALB trust store ARN for the gateway-only gRPC mTLS listener."
   type        = string
-  default     = ""  # empty = mTLS not yet configured; set after pca/ is applied
+}
+
+variable "device_trust_store_arn" {
+  description = "ALB trust store ARN for desktop/mobile device certificates."
+  type        = string
+}
+
+variable "device_certificate_authority_arn" {
+  description = "AWS Private CA ARN used to sign client-generated device CSRs."
+  type        = string
+}
+
+variable "device_certificate_template_arn" {
+  description = "AWS Private CA client-auth certificate template ARN."
+  type        = string
+  default     = "arn:aws:acm-pca:::template/EndEntityClientAuthCertificate/V1"
+}
+
+variable "device_certificate_signing_algorithm" {
+  description = "Signing algorithm matching the AWS Private CA key family."
+  type        = string
+  default     = "SHA256WITHECDSA"
+}
+
+variable "user_portal_login_url" {
+  description = "User portal URL that receives the OIDC authorization callback parameters."
+  type        = string
+  default     = "https://users.apexaegis.app"
+}
+
+variable "user_portal_artifacts_json" {
+  description = "JSON catalog of approved signed client artifacts. Use short-lived signed download URLs."
+  type        = string
+  default     = "[]"
 }
 
 # ── Data sources ───────────────────────────────────────────────────────────
@@ -121,8 +184,17 @@ resource "aws_ecr_lifecycle_policy" "mgmt_plane" {
   })
 }
 
+data "aws_ecr_image" "mgmt_plane" {
+  repository_name = aws_ecr_repository.mgmt_plane.name
+  image_tag       = var.image_tag
+
+  depends_on = [aws_ecr_repository.mgmt_plane]
+}
+
 locals {
-  ecr_image = "${var.aws_account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/apexaegis-mgmt-plane:${var.image_tag}"
+  ecr_image                   = "${aws_ecr_repository.mgmt_plane.repository_url}@${data.aws_ecr_image.mgmt_plane.image_digest}"
+  gateway_acm_certificate_arn = var.gateway_acm_certificate_arn != "" ? var.gateway_acm_certificate_arn : var.acm_certificate_arn
+  device_acm_certificate_arn  = var.device_acm_certificate_arn != "" ? var.device_acm_certificate_arn : var.acm_certificate_arn
 }
 
 # ── Security Groups ────────────────────────────────────────────────────────
@@ -148,14 +220,6 @@ resource "aws_security_group" "alb" {
     description = "HTTP redirect to HTTPS"
   }
 
-  ingress {
-    from_port   = 9443
-    to_port     = 9443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Gateway mTLS API port - ACM PCA client cert required"
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -172,8 +236,8 @@ resource "aws_security_group" "ecs_task" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    from_port       = 8080
-    to_port         = 8080
+    from_port       = 443
+    to_port         = 443
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
     description     = "Traffic from ALB only"
@@ -202,9 +266,35 @@ resource "aws_lb" "mgmt" {
   tags = { Project = "apexaegis" }
 }
 
+resource "aws_lb" "gateway_control" {
+  name               = "apexaegis-gw-control"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = data.aws_subnets.default.ids
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-gateway-control"
+  }
+}
+
+resource "aws_lb" "device_api" {
+  name               = "apexaegis-device-api"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = data.aws_subnets.default.ids
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-device-api"
+  }
+}
+
 resource "aws_lb_target_group" "mgmt" {
   name_prefix      = "apx-mg"
-  port             = 8080
+  port             = 443
   protocol         = "HTTP"
   protocol_version = "HTTP1"
   target_type      = "ip"
@@ -227,6 +317,84 @@ resource "aws_lb_target_group" "mgmt" {
   tags = { Project = "apexaegis" }
 }
 
+resource "aws_lb_target_group" "device_rest" {
+  name_prefix      = "apx-dv"
+  port             = 443
+  protocol         = "HTTP"
+  protocol_version = "HTTP1"
+  target_type      = "ip"
+  vpc_id           = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/health"
+    protocol            = "HTTP"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-device-rest"
+  }
+}
+
+resource "aws_lb_target_group" "gateway_grpc" {
+  name_prefix      = "apx-gw"
+  port             = 443
+  protocol         = "HTTP"
+  protocol_version = "GRPC"
+  target_type      = "ip"
+  vpc_id           = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/grpc.health.v1.Health/Check"
+    protocol            = "HTTP"
+    matcher             = "0"
+    interval            = 30
+    timeout             = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Project = "apexaegis"
+    Name    = "apexaegis-gateway-grpc"
+  }
+}
+
+resource "aws_lb_listener" "device_rest_mtls" {
+  load_balancer_arn = aws_lb.device_api.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = local.device_acm_certificate_arn
+
+  # Desktop/mobile production runtime API. ALB verifies device certificates
+  # from AWS Private CA / MDM deployment and forwards x-amzn-mtls-clientcert-*
+  # headers. The management plane then validates tenant, fingerprint, serial,
+  # and device status before serving client config or routing policy.
+  mutual_authentication {
+    mode            = "verify"
+    trust_store_arn = var.device_trust_store_arn
+  }
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.device_rest.arn
+  }
+}
+
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.mgmt.arn
   port              = 443
@@ -234,18 +402,41 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.acm_certificate_arn
 
-  # mTLS: require client certificates from gateway nodes.
-  # Gateways present ACM PCA-issued certs; ALB validates against the trust store
-  # and forwards the verified cert DN in X-Amzn-Mtls-Clientcert-* headers.
-  # Set gateway_trust_store_arn to enable (populated after pca/ workspace is applied).
-  # mTLS note: ALB `verify` mode on port 443 rejects all browser/web-UI connections
-  # (they have no client cert). Gateway mTLS is handled at the gRPC layer — the
-  # management plane gRPC server validates the gateway's ACM PCA-issued client cert
-  # against the private CA. The trust store is kept for future NLB-based gateway port.
+  # Shared public 443 entrypoint for REST/gRPC clients and gateway bootstrap.
+  # Do not enable ALB mTLS here: ALB mTLS is listener-wide and would require
+  # every browser, desktop client, and curl caller to present a gateway cert.
+  # Gateway authentication on this shared endpoint is handled in the app using
+  # X-Gateway-Key/Bearer auth. Use a separate gateway-only 443 hostname/listener
+  # or NLB TLS passthrough if strict gateway mTLS is required later.
+  mutual_authentication {
+    mode = "off"
+  }
 
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.mgmt.arn
+  }
+}
+
+resource "aws_lb_listener" "gateway_grpc_mtls" {
+  load_balancer_arn = aws_lb.gateway_control.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = local.gateway_acm_certificate_arn
+
+  # Gateway-only production control plane. ALB verifies the gateway client
+  # certificate and forwards the verified subject to the gRPC backend as
+  # x-amzn-mtls-clientcert-* metadata. The gRPC server then verifies that the
+  # certificate CN matches the claimed gateway_id.
+  mutual_authentication {
+    mode            = "verify"
+    trust_store_arn = var.gateway_trust_store_arn
+  }
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gateway_grpc.arn
   }
 }
 
@@ -261,31 +452,6 @@ resource "aws_lb_listener" "http_redirect" {
       protocol    = "HTTPS"
       status_code = "HTTP_301"
     }
-  }
-}
-
-# ── Gateway mTLS listener (port 9443) ─────────────────────────────────────
-# Separate from the public HTTPS listener so mTLS only applies to gateways.
-# Gateways connect here for registration, heartbeat, and policy sync.
-# ALB verifies client cert against the ACM PCA trust store and forwards
-# the verified identity in X-Amzn-Mtls-Clientcert-Subject header.
-
-resource "aws_lb_listener" "gateway_mtls" {
-  count             = var.gateway_trust_store_arn != "" ? 1 : 0
-  load_balancer_arn = aws_lb.mgmt.arn
-  port              = 9443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = var.acm_certificate_arn
-
-  mutual_authentication {
-    mode            = "verify"
-    trust_store_arn = var.gateway_trust_store_arn
-  }
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.mgmt.arn
   }
 }
 
@@ -332,6 +498,36 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role" "ecs_task" {
+  name = "apexaegis-mgmt-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "device_certificate_issuance" {
+  name = "apexaegis-device-certificate-issuance"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "acm-pca:IssueCertificate",
+        "acm-pca:GetCertificate"
+      ]
+      Resource = var.device_certificate_authority_arn
+    }]
+  })
+}
+
 # CloudWatch Logs for container output
 resource "aws_cloudwatch_log_group" "mgmt" {
   name              = "/ecs/apexaegis-mgmt-plane"
@@ -349,6 +545,7 @@ resource "aws_ecs_task_definition" "mgmt" {
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{
     name      = "management-plane"
@@ -356,25 +553,32 @@ resource "aws_ecs_task_definition" "mgmt" {
     essential = true
 
     portMappings = [{
-      containerPort = 8080
+      containerPort = 443
       protocol      = "tcp"
     }]
 
-    environment = concat(
-      [
-        { name = "LISTEN_ADDR",    value = ":8080" },
-        { name = "MIGRATIONS_DIR", value = "/migrations" },
-        { name = "DEPLOY_MODE",    value = "cloud" },
-        { name = "GIN_MODE",       value = "release" },
-        { name = "GATEWAY_API_KEY", value = var.gateway_api_key },
-        # mTLS: when set, the mgmt plane extracts gateway identity from the
-        # X-Amzn-Mtls-Clientcert-Subject header forwarded by ALB.
-        { name = "GATEWAY_MTLS_ENABLED", value = var.gateway_trust_store_arn != "" ? "true" : "false" },
-      ],
-      var.gateway_trust_store_arn != "" ? [
-        { name = "GATEWAY_CA_CERT", value = data.aws_ssm_parameter.gateway_ca_cert[0].value }
-      ] : []
-    )
+    environment = [
+      { name = "LISTEN_ADDR", value = ":443" },
+      { name = "MIGRATIONS_DIR", value = "/migrations" },
+      { name = "DEPLOY_MODE", value = "cloud" },
+      { name = "GIN_MODE", value = "release" },
+      { name = "APP_TENANT_ORG_ID", value = var.tenant_org_id },
+      { name = "GATEWAY_API_KEY", value = var.gateway_api_key },
+      { name = "GATEWAY_REST_ENABLED", value = "false" },
+      # The shared public listener cannot use ALB mTLS because that would
+      # also force normal REST/desktop clients to present gateway certs.
+      { name = "GATEWAY_MTLS_ENABLED", value = "false" },
+      # Gateway registration, heartbeat, policy sync, and telemetry are handled
+      # by the gateway-only gRPC listener. ALB verifies mTLS and forwards cert
+      # metadata; the gRPC server rejects mismatched gateway_id claims.
+      { name = "GRPC_REQUIRE_CLIENT_IDENTITY", value = "true" },
+      { name = "WEB_UI_ALLOWED_ORIGINS", value = "https://www.apexaegis.app,https://apexaegis.app,${var.user_portal_login_url}" },
+      { name = "USER_PORTAL_LOGIN_URL", value = var.user_portal_login_url },
+      { name = "USER_PORTAL_ARTIFACTS_JSON", value = var.user_portal_artifacts_json },
+      { name = "DEVICE_CERTIFICATE_AUTHORITY_ARN", value = var.device_certificate_authority_arn },
+      { name = "DEVICE_CERTIFICATE_TEMPLATE_ARN", value = var.device_certificate_template_arn },
+      { name = "DEVICE_CERTIFICATE_SIGNING_ALGORITHM", value = var.device_certificate_signing_algorithm },
+    ]
 
     secrets = [
       {
@@ -401,7 +605,7 @@ resource "aws_ecs_task_definition" "mgmt" {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      command     = ["CMD-SHELL", "wget -qO- http://localhost:443/health || exit 1"]
       interval    = 30
       timeout     = 10
       retries     = 3
@@ -431,18 +635,11 @@ resource "aws_ssm_parameter" "jwt_secret" {
 }
 
 resource "aws_ssm_parameter" "vault_passphrase" {
-  name  = "/apexaegis/mgmt-plane/vault-passphrase"
-  type  = "SecureString"
-  value = var.vault_passphrase
+  name      = "/apexaegis/mgmt-plane/vault-passphrase"
+  type      = "SecureString"
+  value     = var.vault_passphrase
   overwrite = true
-  tags = { Project = "apexaegis" }
-}
-
-# Read the gateway CA cert written by pca/ workspace
-# (not managed here — owned by pca/ workspace)
-data "aws_ssm_parameter" "gateway_ca_cert" {
-  count = var.gateway_trust_store_arn != "" ? 1 : 0
-  name  = "/apexaegis/gateway/ca-cert"
+  tags      = { Project = "apexaegis" }
 }
 
 # IAM policy to read SSM parameters
@@ -454,16 +651,11 @@ resource "aws_iam_policy" "ssm_read" {
     Statement = [{
       Effect = "Allow"
       Action = ["ssm:GetParameters", "ssm:GetParameter"]
-      Resource = concat(
-        [
-          aws_ssm_parameter.database_url.arn,
-          aws_ssm_parameter.jwt_secret.arn,
-          aws_ssm_parameter.vault_passphrase.arn,
-        ],
-        var.gateway_trust_store_arn != "" ? [
-          "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/gateway/ca-cert"
-        ] : []
-      )
+      Resource = [
+        aws_ssm_parameter.database_url.arn,
+        aws_ssm_parameter.jwt_secret.arn,
+        aws_ssm_parameter.vault_passphrase.arn,
+      ]
       }, {
       Effect   = "Allow"
       Action   = ["kms:Decrypt"]
@@ -495,7 +687,19 @@ resource "aws_ecs_service" "mgmt" {
   load_balancer {
     target_group_arn = aws_lb_target_group.mgmt.arn
     container_name   = "management-plane"
-    container_port   = 8080
+    container_port   = 443
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.device_rest.arn
+    container_name   = "management-plane"
+    container_port   = 443
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.gateway_grpc.arn
+    container_name   = "management-plane"
+    container_port   = 443
   }
 
   deployment_circuit_breaker {
@@ -505,6 +709,8 @@ resource "aws_ecs_service" "mgmt" {
 
   depends_on = [
     aws_lb_listener.https,
+    aws_lb_listener.device_rest_mtls,
+    aws_lb_listener.gateway_grpc_mtls,
     aws_iam_role_policy_attachment.ecs_task_execution,
   ]
 
@@ -518,9 +724,39 @@ output "alb_dns_name" {
   value       = aws_lb.mgmt.dns_name
 }
 
+output "gateway_control_alb_dns_name" {
+  description = "Point your gateway_domain CNAME to this value"
+  value       = aws_lb.gateway_control.dns_name
+}
+
+output "device_api_alb_dns_name" {
+  description = "Point your device_domain CNAME to this value"
+  value       = aws_lb.device_api.dns_name
+}
+
+output "device_api_endpoint" {
+  description = "Desktop/mobile REST mTLS endpoint"
+  value       = "${var.device_domain}:443"
+}
+
+output "gateway_control_endpoint" {
+  description = "Gateway gRPC mTLS endpoint"
+  value       = "${var.gateway_domain}:443"
+}
+
 output "ecr_repository_url" {
   description = "Push management-plane images here"
   value       = aws_ecr_repository.mgmt_plane.repository_url
+}
+
+output "ecr_image_digest" {
+  description = "Resolved ECR digest for image_tag"
+  value       = data.aws_ecr_image.mgmt_plane.image_digest
+}
+
+output "ecs_container_image" {
+  description = "Immutable image reference used by the ECS task definition"
+  value       = local.ecr_image
 }
 
 output "ecs_cluster_name" {

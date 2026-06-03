@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/zcp/management-plane/internal/api/handlers"
 	"github.com/zcp/management-plane/internal/api/middleware"
@@ -31,12 +36,13 @@ import (
 	"github.com/zcp/management-plane/internal/sdn"
 	"github.com/zcp/management-plane/internal/security"
 	"github.com/zcp/management-plane/internal/segment"
+	"github.com/zcp/management-plane/internal/threat-intel"
 	"github.com/zcp/management-plane/internal/validation"
 	"github.com/zcp/management-plane/internal/websocket"
 )
 
 func main() {
-	logger, _ := zap.NewProduction()
+	logger, _ := newLogger()
 	defer logger.Sync()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,7 +89,8 @@ func main() {
 		logger.Fatal("DATABASE_URL is required — set it to your CockroachDB Cloud connection string")
 	}
 
-	dbConn, err := db.Open(db.Config{DSN: databaseURL}, logger)
+	tenantOrgID := envOrDefault("APP_TENANT_ORG_ID", db.SystemThreatOrgID)
+	dbConn, err := db.Open(db.Config{DSN: databaseURL, TenantOrgID: tenantOrgID}, logger)
 	if err != nil {
 		logger.Fatal("Failed to connect to CockroachDB Cloud", zap.Error(err))
 	}
@@ -91,8 +98,10 @@ func main() {
 	// Run schema migrations on startup (idempotent — skips already-applied)
 	migrationsDir := envOrDefault("MIGRATIONS_DIR", "internal/db/migrations")
 	if migErr := dbConn.Migrate(migrationsDir); migErr != nil {
-		fmt.Fprintf(os.Stderr, "MIGRATION ERROR: %v\n", migErr)
-		logger.Fatal("Schema migration failed", zap.Error(migErr))
+		logger.Fatal("Schema migration failed",
+			zap.Error(migErr),
+			zap.String("migration_dir", migrationsDir),
+		)
 	}
 
 	// ── Stores (CockroachDB Cloud backed) ──
@@ -101,6 +110,8 @@ func main() {
 
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
+	deviceStore := db.NewDeviceStore(dbConn, logger)
+	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
 
 	// ── Gateway registry persistence ──
 	gwStore := db.NewGatewayStore(dbConn)
@@ -116,6 +127,14 @@ func main() {
 		logger.Fatal("JWT_SECRET is required — set a strong random secret (32+ chars)")
 	}
 	authStore := db.NewAuthStore(dbConn, []byte(jwtSecret), logger)
+
+	var devicePCA *security.AWSPrivateCA
+	if pca, pcaErr := security.NewAWSPrivateCA(ctx); pcaErr != nil {
+		logger.Warn("AWS Private CA device enrollment disabled", zap.Error(pcaErr))
+	} else {
+		devicePCA = pca
+		logger.Info("AWS Private CA device enrollment enabled")
+	}
 
 	// ── SCIM store (admin + client user provisioning) ──
 	scimStore := db.NewSCIMStore(dbConn, logger)
@@ -149,6 +168,9 @@ func main() {
 	idBroker := identity.NewBroker(logger)
 	idpStore := db.NewIdPStore(dbConn, logger)
 	idBroker.SetPersister(idpStore)
+
+	// ── IdP Configuration Logging (audit trail for IdP changes) ──
+	idpLogStore := db.NewIdPLogStore(dbConn, logger)
 
 	// ── SDN whitebox switch manager ──
 	sdnManager := sdn.NewManager(logger)
@@ -189,7 +211,7 @@ func main() {
 
 	// ── Code signing, enrollment tokens, command signing ──
 	codeSigningSvc := security.NewCodeSigningService(logger)
-	enrollmentSvc := security.NewEnrollmentService(logger)
+	enrollmentSvc := security.NewEnrollmentService(logger, ca)
 	commandSigningSvc := security.NewCommandSigningService(codeSigningSvc, logger)
 
 	// ── JWKS key rotation (manages Ed25519 signing keys + ECDSA CA keys) ──
@@ -214,6 +236,7 @@ func main() {
 	router.Use(middleware.RequestID())
 	router.Use(middleware.SafeRecovery())
 	router.Use(middleware.ErrorHandler())
+	router.Use(middleware.SecurityHeaders())
 	router.Use(middleware.CORS())
 
 	// Public health endpoints
@@ -242,16 +265,28 @@ func main() {
 		authAPI.GET("/me", middleware.JWTAuth(authStore), authHandler.Me)
 
 		// SSO/OIDC login flow (Okta, Azure AD, etc.)
-		ssoHandler := handlers.NewSSOHandler(idBroker, authStore, logger)
+		ssoHandler := handlers.NewSSOHandler(idBroker, authStore, scimStore, logger)
 		authAPI.GET("/sso/providers", ssoHandler.ListSSOProviders)
 		authAPI.GET("/sso/:idp_id/authorize", ssoHandler.Authorize)
 		authAPI.GET("/sso/callback", ssoHandler.CallbackRedirect)
 		authAPI.POST("/sso/callback", ssoHandler.Callback)
 	}
 
+	// Self-service user portal API (SCIM client-user JWT only).
+	portalAPI := router.Group("/api/v1/portal")
+	portalAPI.Use(middleware.JWTAuth(authStore))
+	portalAPI.Use(middleware.RequireRole("client_user"))
+	{
+		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, devicePCA, logger)
+		portalAPI.GET("/profile", portalHandler.Profile)
+		portalAPI.GET("/artifacts", portalHandler.Artifacts)
+		portalAPI.POST("/devices/certificates", portalHandler.IssueDeviceCertificate)
+	}
+
 	// User Management API (admin-only)
 	userAPI := router.Group("/api/v1/users")
 	userAPI.Use(middleware.JWTAuth(authStore))
+	userAPI.Use(middleware.RequireWriteAccess())
 	{
 		userHandler := handlers.NewUserHandler(authStore, logger)
 		userAPI.GET("", userHandler.ListUsers)
@@ -263,6 +298,7 @@ func main() {
 	// Client Users API (admin-only — manage endpoint users from web UI)
 	clientAPI := router.Group("/api/v1/client-users")
 	clientAPI.Use(middleware.JWTAuth(authStore))
+	clientAPI.Use(middleware.RequireWriteAccess())
 	{
 		clientAPI.GET("", func(c *gin.Context) {
 			filter := c.Query("search")
@@ -278,8 +314,30 @@ func main() {
 		})
 	}
 
+	// Device Inventory API (admin-only — mTLS registered endpoint devices)
+	deviceAPI := router.Group("/api/v1/devices")
+	deviceAPI.Use(middleware.JWTAuth(authStore))
+	deviceAPI.Use(middleware.RequireWriteAccess())
+	{
+		deviceHandler := handlers.NewDeviceHandler(deviceStore, logger)
+		deviceAPI.GET("", deviceHandler.ListDevices)
+	}
+
+	// Group Inventory API (admin-only — includes SCIM-pushed groups)
+	groupAPI := router.Group("/api/v1/groups")
+	groupAPI.Use(middleware.JWTAuth(authStore))
+	groupAPI.Use(middleware.RequireWriteAccess())
+	{
+		groupHandler := handlers.NewGroupHandler(scimStore, logger)
+		groupAPI.GET("", groupHandler.ListGroups)
+		groupAPI.POST("", groupHandler.CreateGroup)
+		groupAPI.PUT("/:id", groupHandler.UpdateGroup)
+		groupAPI.DELETE("/:id", groupHandler.DeleteGroup)
+	}
+
 	// SCIM 2.0 provisioning API (RFC 7644 — bearer token auth from IdPs)
 	scimAPI := router.Group("/scim/v2")
+	scimAPI.Use(middleware.SCIMContentType())
 	scimAPI.Use(middleware.SCIMAuth(scimStore))
 	{
 		scimHandler := handlers.NewSCIMHandler(scimStore, logger)
@@ -294,6 +352,7 @@ func main() {
 		scimAPI.POST("/AdminUsers", scimHandler.CreateAdminUser)
 		scimAPI.GET("/AdminUsers/:id", scimHandler.GetAdminUser)
 		scimAPI.PUT("/AdminUsers/:id", scimHandler.UpdateAdminUser)
+		scimAPI.PATCH("/AdminUsers/:id", scimHandler.PatchAdminUser)
 		scimAPI.DELETE("/AdminUsers/:id", scimHandler.DeleteAdminUser)
 
 		// Client endpoint users (SSE desktop/mobile users)
@@ -301,6 +360,7 @@ func main() {
 		scimAPI.POST("/Users", scimHandler.CreateClientUser)
 		scimAPI.GET("/Users/:id", scimHandler.GetClientUser)
 		scimAPI.PUT("/Users/:id", scimHandler.UpdateClientUser)
+		scimAPI.PATCH("/Users/:id", scimHandler.PatchClientUser)
 		scimAPI.DELETE("/Users/:id", scimHandler.DeleteClientUser)
 
 		// Groups
@@ -308,13 +368,15 @@ func main() {
 		scimAPI.POST("/Groups", scimHandler.CreateGroup)
 		scimAPI.GET("/Groups/:id", scimHandler.GetGroup)
 		scimAPI.PUT("/Groups/:id", scimHandler.UpdateGroup)
+		scimAPI.PATCH("/Groups/:id", scimHandler.PatchGroup)
 		scimAPI.DELETE("/Groups/:id", scimHandler.DeleteGroup)
 	}
 
-	// Gateway-facing API (authenticated by gateway API key or mTLS)
-	gwAPI := router.Group("/api/v1/gateway")
-	gwAPI.Use(middleware.GatewayAuth(gwRegistry))
-	{
+	// Legacy gateway-facing REST API. Production gateway control uses the
+	// GatewayControl gRPC service over the gateway-only mTLS listener.
+	if os.Getenv("GATEWAY_REST_ENABLED") == "true" {
+		gwAPI := router.Group("/api/v1/gateway")
+		gwAPI.Use(middleware.GatewayAuth(gwRegistry))
 		gwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
 		gwAPI.POST("/register", gwHandler.Register)
 		gwAPI.GET("/policies", gwHandler.GetPolicies)
@@ -331,11 +393,46 @@ func main() {
 
 		// WebSocket for push-based policy updates
 		gwAPI.GET("/policies/ws", wsHub.HandleSubscribe)
+	} else {
+		logger.Info("Legacy gateway REST API disabled; using gRPC gateway control")
+	}
+
+	// Device-authenticated Gateway Discovery API (desktop/mobile clients use device mTLS)
+	publicGWAPI := router.Group("/api/v1/gateways")
+	publicGWAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		gwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
+		publicGWAPI.GET("/available", gwHandler.ListAvailableGateways)
+	}
+
+	// Agent bootstrap endpoint. The handler itself validates device mTLS and tenant ID.
+	agentAPI := router.Group("/api/v1/agent")
+	{
+		agentAuthHandler := handlers.NewAgentAuthHandler(deviceStore, authStore, logger)
+		agentAPI.POST("/auth", agentAuthHandler.Authenticate)
+	}
+
+	// Device-authenticated client runtime configuration endpoints.
+	deviceClientAPI := router.Group("/api/v1/client")
+	deviceClientAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, logger)
+		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
+		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
+	}
+
+	// Device-authenticated legacy agent policy endpoint.
+	agentPolicyAPI := router.Group("/api/v1/agent")
+	agentPolicyAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		agentHandler := handlers.NewAgentHandler(policyStore, logger)
+		agentPolicyAPI.GET("/policies", agentHandler.GetPolicies)
 	}
 
 	// P2P Mesh API (authenticated by client JWT)
 	meshAPI := router.Group("/api/v1/mesh")
 	meshAPI.Use(middleware.JWTAuth(authStore))
+	meshAPI.Use(middleware.RequireWriteAccess())
 	{
 		meshHandler := handlers.NewMeshHandler(meshCoordinator, logger)
 		meshAPI.POST("/peers/register", meshHandler.RegisterPeer)
@@ -349,6 +446,7 @@ func main() {
 	// Management API (admin UI)
 	adminAPI := router.Group("/api/v1/admin")
 	adminAPI.Use(middleware.JWTAuth(authStore))
+	adminAPI.Use(middleware.RequireWriteAccess())
 	{
 		adminHandler := handlers.NewAdminHandler(gwRegistry, policyStore, meshCoordinator, logger)
 		adminAPI.GET("/gateways", adminHandler.ListGateways)
@@ -359,6 +457,19 @@ func main() {
 		adminAPI.GET("/policies", adminHandler.ListPolicies)
 		adminAPI.DELETE("/policies/:id", adminHandler.DeletePolicy)
 		adminAPI.GET("/mesh/topology", adminHandler.GetMeshTopology)
+		adminAPI.GET("/organization/deployment-info", func(c *gin.Context) {
+			orgID := c.GetString("org_id")
+			if orgID == "" {
+				c.JSON(401, gin.H{"error": "org_id not found in context"})
+				return
+			}
+			info, infoErr := deviceStore.GetDeploymentInfo(c.Request.Context(), orgID)
+			if infoErr != nil {
+				c.JSON(500, gin.H{"error": "failed to get deployment info"})
+				return
+			}
+			c.JSON(200, info)
+		})
 
 		// Config version control (last 10 revisions, revert capability)
 		adminAPI.GET("/config/versions", adminHandler.ListConfigVersions)
@@ -370,6 +481,16 @@ func main() {
 		adminAPI.POST("/config/lock", adminHandler.AcquireConfigLock)
 		adminAPI.DELETE("/config/lock", adminHandler.ReleaseConfigLock)
 		adminAPI.GET("/config/lock", adminHandler.GetConfigLock)
+
+		// IdP Configuration Logging (audit trail for IdP integration changes)
+		idpLogsHandler := handlers.NewIdPLogsHandler(idpLogStore, logger)
+		adminAPI.GET("/idp/logs", idpLogsHandler.GetIdPLogs)
+		adminAPI.GET("/idp/logs/summary", idpLogsHandler.GetIdPLogSummary)
+		adminAPI.GET("/idp/logs/provider/:provider_type", idpLogsHandler.GetProviderLogs)
+
+		// IdP Test Connection (validate IdP connectivity before saving)
+		idpTestHandler := handlers.NewIdPTestHandler(idpStore, idpLogStore, idBroker, logger)
+		adminAPI.POST("/idp/:id/test", idpTestHandler.TestConnection)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
@@ -378,6 +499,7 @@ func main() {
 	// TLS Scanner & ApexAdversary Outreach API
 	scannerAPI := router.Group("/api/v1/scanner")
 	scannerAPI.Use(middleware.JWTAuth(authStore))
+	scannerAPI.Use(middleware.RequireWriteAccess())
 	{
 		scanHandler := handlers.NewScannerHandler(tlsScanner, outreachEngine, auditLog, logger)
 		scannerAPI.POST("/sources", scanHandler.AddSource)
@@ -396,6 +518,7 @@ func main() {
 	// Audit Logs API
 	auditAPI := router.Group("/api/v1/audit")
 	auditAPI.Use(middleware.JWTAuth(authStore))
+	auditAPI.Use(middleware.RequireWriteAccess())
 	{
 		auditHandler := handlers.NewAuditHandler(auditLog, logger)
 		auditAPI.GET("/logs", auditHandler.ListAuditLogs)
@@ -421,6 +544,7 @@ func main() {
 	// Advanced Security Group Tags (SGT) & Branch Sites API
 	sgtAPI := router.Group("/api/v1/sgt")
 	sgtAPI.Use(middleware.JWTAuth(authStore))
+	sgtAPI.Use(middleware.RequireWriteAccess())
 	{
 		sgtHandler := handlers.NewSegmentHandler(sgtStore, logger)
 		sgtAPI.GET("/tags", sgtHandler.ListTags)
@@ -445,6 +569,7 @@ func main() {
 	// SDN Whitebox Switch Management API
 	sdnAPI := router.Group("/api/v1/sdn")
 	sdnAPI.Use(middleware.JWTAuth(authStore))
+	sdnAPI.Use(middleware.RequireWriteAccess())
 	{
 		sdnHandler := handlers.NewSDNHandler(sdnManager, logger)
 		sdnAPI.GET("/switches", sdnHandler.ListSwitches)
@@ -460,13 +585,16 @@ func main() {
 	// Identity Broker API (IdP federation, token exchange, sessions)
 	idAPI := router.Group("/api/v1/identity")
 	idAPI.Use(middleware.JWTAuth(authStore))
+	idAPI.Use(middleware.RequireWriteAccess())
 	{
-		idHandler := handlers.NewIdentityBrokerHandler(idBroker, logger)
+		idHandler := handlers.NewIdentityBrokerHandler(idBroker, idpStore, logger)
 		idAPI.GET("/providers", idHandler.ListIdPs)
 		idAPI.GET("/providers/:id", idHandler.GetIdP)
 		idAPI.POST("/providers", idHandler.CreateIdP)
 		idAPI.PUT("/providers/:id", idHandler.UpdateIdP)
 		idAPI.DELETE("/providers/:id", idHandler.DeleteIdP)
+		idAPI.GET("/auth-profiles", idHandler.ListAuthProfiles)
+		idAPI.PUT("/auth-profiles", idHandler.UpdateAuthProfiles)
 		idAPI.POST("/token/exchange", idHandler.ExchangeToken)
 		idAPI.GET("/sessions", idHandler.ListSessions)
 		idAPI.GET("/sessions/:id", idHandler.GetSession)
@@ -476,6 +604,7 @@ func main() {
 	// Feature Licensing API
 	featureAPI := router.Group("/api/v1/features")
 	featureAPI.Use(middleware.JWTAuth(authStore))
+	featureAPI.Use(middleware.RequireWriteAccess())
 	{
 		featHandler := handlers.NewFeatureHandler(featureStore, orgPlan, logger)
 		featureAPI.GET("", featHandler.ListFeatures)
@@ -487,6 +616,7 @@ func main() {
 	// Security Profiles API
 	profileAPI := router.Group("/api/v1/profiles")
 	profileAPI.Use(middleware.JWTAuth(authStore))
+	profileAPI.Use(middleware.RequireWriteAccess())
 	{
 		profHandler := handlers.NewProfileHandler(profileStore, logger)
 		profileAPI.GET("/:type", profHandler.ListProfiles)
@@ -500,6 +630,7 @@ func main() {
 	// GhostedApps Detection API
 	ghostAPI := router.Group("/api/v1/ghosted-apps")
 	ghostAPI.Use(middleware.JWTAuth(authStore))
+	ghostAPI.Use(middleware.RequireWriteAccess())
 	{
 		ghostHandler := handlers.NewGhostedAppsHandler(logger)
 		ghostAPI.GET("", ghostHandler.ListAgents)
@@ -508,27 +639,72 @@ func main() {
 		ghostAPI.GET("/scan/last", ghostHandler.GetLastScan)
 	}
 
-	// Client Config & Route Policy per Group API
-	clientConfigHandler := handlers.NewClientConfigHandler(logger)
-	ccAPI := router.Group("/api/v1/client-config")
-	ccAPI.Use(middleware.JWTAuth(authStore))
+	// Client Configuration API (Phase 6 Option B)
+	clientConfigHandler := handlers.NewClientConfigHandler(clientConfigStore, logger)
+	ccAdminAPI := router.Group("/api/v1/admin/client-config")
+	ccAdminAPI.Use(middleware.JWTAuth(authStore))
+	ccAdminAPI.Use(middleware.RequireWriteAccess())
 	{
-		ccAPI.GET("", clientConfigHandler.ListClientConfigs)
-		ccAPI.GET("/:group_id", clientConfigHandler.GetClientConfig)
-		ccAPI.POST("", clientConfigHandler.CreateClientConfig)
-		ccAPI.PUT("/:group_id", clientConfigHandler.UpdateClientConfig)
+		ccAdminAPI.GET("", clientConfigHandler.ListClientConfigs)
+		ccAdminAPI.GET("/:group_id", clientConfigHandler.GetClientConfig)
+		ccAdminAPI.POST("", clientConfigHandler.CreateClientConfig)
+		ccAdminAPI.PUT("/:group_id", clientConfigHandler.UpdateClientConfig)
+		ccAdminAPI.DELETE("/:group_id", clientConfigHandler.DeleteClientConfig)
+		ccAdminAPI.GET("/audit-logs", clientConfigHandler.GetAuditLogs)
+		ccAdminAPI.POST("/validate", clientConfigHandler.ValidateConfig)
 	}
-	routeAPI := router.Group("/api/v1/route-config")
-	routeAPI.Use(middleware.JWTAuth(authStore))
+
+	// ── DNS Threat Intelligence API (Phase 6 DNS Filtering) ──
+	// Threat intel sourced from: VirusTotal, AlienVault OTX, URLScan.io
+	threatStore := db.NewThreatStore(dbConn, logger)
+
+	// Initialize fetcher with API keys from environment
+	vtAPIKey := os.Getenv("VIRUSTOTAL_API_KEY")
+	otxAPIKey := os.Getenv("OTX_API_KEY")
+	// OTX requires LevelBlue USM integration, skip for now
+	urlscanAPIKey := os.Getenv("URLSCAN_API_KEY")
+
+	threatFetcher := threat_intel.NewThreatFetcher(otxAPIKey, vtAPIKey, urlscanAPIKey, logger)
+	syncService := threat_intel.NewSyncService(threatStore, threatFetcher, logger)
+	syncService.Start(context.Background())
+
+	threatIntelHandler := handlers.NewThreatIntelHandler(threatStore, syncService, logger)
+	threatAPI := router.Group("/api/v1/admin/threat-intel")
+	threatAPI.Use(middleware.JWTAuth(authStore))
+	threatAPI.Use(middleware.RequireWriteAccess())
 	{
-		routeAPI.GET("", clientConfigHandler.ListRouteConfigs)
-		routeAPI.GET("/:group_id", clientConfigHandler.GetRouteConfig)
-		routeAPI.PUT("/:group_id", clientConfigHandler.UpdateRouteConfig)
+		threatAPI.GET("/sources", threatIntelHandler.ListSources)
+		threatAPI.GET("/stats", threatIntelHandler.GetSourceStats)
+		threatAPI.POST("/sync", threatIntelHandler.ManualSync)
+		threatAPI.POST("/lookup", threatIntelHandler.LookupThreat)
+		threatAPI.POST("/cleanup", threatIntelHandler.EvictStale)
 	}
+
+	logger.Info("threat intelligence API initialized",
+		zap.Bool("virustotal_enabled", vtAPIKey != ""),
+		zap.Bool("otx_enabled", otxAPIKey != ""),
+		zap.Bool("urlscan_enabled", urlscanAPIKey != ""),
+	)
+
+	// ── DNS Query Logging API ──
+	dnsLogStore := db.NewDNSLogStore(dbConn, logger)
+	dnsLogsHandler := handlers.NewDNSLogsHandler(dnsLogStore, logger)
+	dnsLogsAPI := router.Group("/api/v1/admin/dns-logs")
+	dnsLogsAPI.Use(middleware.JWTAuth(authStore))
+	dnsLogsAPI.Use(middleware.RequireWriteAccess())
+	{
+		dnsLogsAPI.GET("", dnsLogsHandler.GetDNSLogs)
+		dnsLogsAPI.GET("/summary", dnsLogsHandler.GetDNSSummary)
+		dnsLogsAPI.GET("/stats", dnsLogsHandler.GetDNSLogsStats)
+		dnsLogsAPI.POST("/cleanup", dnsLogsHandler.DeleteOldLogs)
+	}
+
+	logger.Info("DNS logging API initialized")
 
 	// Security Validation API (container-based test infrastructure)
 	validationAPI := router.Group("/api/v1/validation")
 	validationAPI.Use(middleware.JWTAuth(authStore))
+	validationAPI.Use(middleware.RequireWriteAccess())
 	{
 		valHandler := handlers.NewValidationHandler(validationEngine, logger)
 		validationAPI.GET("/tests", valHandler.ListTests)
@@ -544,6 +720,7 @@ func main() {
 	// Security API — code signing, enrollment tokens, command signing
 	securityAPI := router.Group("/api/v1/security")
 	securityAPI.Use(middleware.JWTAuth(authStore))
+	securityAPI.Use(middleware.RequireWriteAccess())
 	{
 		secHandler := handlers.NewSecurityHandler(codeSigningSvc, enrollmentSvc, commandSigningSvc, logger)
 
@@ -554,11 +731,9 @@ func main() {
 		securityAPI.GET("/keys", secHandler.ListSigningKeys)
 		securityAPI.GET("/keys/:id", secHandler.GetPublicKey)
 
-		// Enrollment tokens
-		securityAPI.POST("/enrollment/tokens", secHandler.CreateEnrollmentToken)
-		securityAPI.GET("/enrollment/tokens", secHandler.ListEnrollmentTokens)
-		securityAPI.DELETE("/enrollment/tokens/:id", secHandler.RevokeEnrollmentToken)
-		securityAPI.POST("/enrollment/enroll", secHandler.EnrollAgent)
+		// Device enrollment is certificate-driven. The portal/MDM issues device
+		// certificates; runtime registration happens through /api/v1/agent/auth
+		// using mTLS, not one-time registration tokens.
 		securityAPI.GET("/enrollment/agents", secHandler.ListEnrolledAgents)
 		securityAPI.DELETE("/enrollment/agents/:id", secHandler.DeactivateAgent)
 
@@ -569,13 +744,20 @@ func main() {
 		securityAPI.GET("/commands/pending/:targetId", secHandler.GetPendingCommands)
 	}
 
-	// ── Start mTLS server for gateway-to-mgmt-plane communication ──
-	// Skipped in demo/cloud mode — Railway only exposes one port.
-	// Gateways authenticate via GATEWAY_API_KEY over the shared gRPC+HTTP port.
-	// Enable in production by setting MTLS_ENABLED=true with a dedicated port.
+	listenAddr := envOrDefault("LISTEN_ADDR", ":443")
+	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
+
+	// ── Start optional dedicated mTLS server for gateway-to-mgmt-plane communication ──
+	// Production gateway control uses gRPC behind a gateway-only mTLS ALB/NLB.
+	// Keep this legacy REST mTLS listener disabled unless a lab deployment needs it.
 	if os.Getenv("MTLS_ENABLED") == "true" {
-		go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
-		logger.Info("mTLS server enabled", zap.String("addr", envOrDefault("MTLS_LISTEN_ADDR", ":9443")))
+		mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", listenAddr)
+		if mtlsAddr == listenAddr {
+			logger.Info("mTLS enabled on shared REST+gRPC listener", zap.String("addr", listenAddr))
+		} else {
+			go startMTLSServer(ctx, ca, gwRegistry, policyStore, meshCoordinator, wsHub, logger)
+			logger.Info("dedicated mTLS server enabled", zap.String("addr", mtlsAddr))
+		}
 	} else {
 		logger.Info("mTLS server disabled (set MTLS_ENABLED=true to enable)")
 	}
@@ -583,9 +765,6 @@ func main() {
 	// ── Multiplex gRPC + HTTP on a single port (Railway only exposes one port) ──
 	// gRPC requests carry "Content-Type: application/grpc" — cmux routes them
 	// to the gRPC server; everything else goes to the Gin HTTP handler.
-	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
-	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
-
 	logger.Info("Starting multiplexed gRPC+HTTP listener",
 		zap.String("addr", listenAddr),
 		zap.String("deploy_mode", deployMode),
@@ -604,7 +783,11 @@ func main() {
 
 	// gRPC server
 	grpcSrv := grpcserver.NewServer(grpcserver.Config{
-		DevMode: deployMode == "dev",
+		CertFile:              os.Getenv("GRPC_TLS_CERT_FILE"),
+		KeyFile:               os.Getenv("GRPC_TLS_KEY_FILE"),
+		CACertFile:            os.Getenv("GRPC_TLS_CA_FILE"),
+		DevMode:               os.Getenv("GRPC_TLS_ENABLED") != "true",
+		RequireClientIdentity: os.Getenv("GRPC_REQUIRE_CLIENT_IDENTITY") == "true",
 	}, grpcserver.Deps{
 		PolicyStore: policyStore,
 		Registry:    gwRegistry,
@@ -630,7 +813,7 @@ func main() {
 
 	// Start cmux dispatcher
 	go func() {
-		if err := mux.Serve(); err != nil {
+		if err := mux.Serve(); err != nil && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
 			logger.Error("cmux error", zap.Error(err))
 		}
 	}()
@@ -662,7 +845,7 @@ func startMTLSServer(
 	wsHub *websocket.Hub,
 	logger *zap.Logger,
 ) {
-	mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", ":9443")
+	mtlsAddr := envOrDefault("MTLS_LISTEN_ADDR", ":443")
 	tlsConfig := ca.ServerTLSConfig()
 
 	router := gin.New()
@@ -695,4 +878,153 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func newLogger() (*zap.Logger, error) {
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		return zap.NewProduction()
+	}
+
+	level := zapcore.InfoLevel
+	if strings.EqualFold(os.Getenv("LOG_LEVEL"), "debug") {
+		level = zapcore.DebugLevel
+	}
+
+	core := &cefCore{
+		out:     os.Stderr,
+		mu:      &sync.Mutex{},
+		enabler: zap.LevelEnablerFunc(func(l zapcore.Level) bool { return l >= level }),
+	}
+
+	return zap.New(
+		core,
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.FatalLevel),
+	), nil
+}
+
+type cefCore struct {
+	mu      *sync.Mutex
+	out     *os.File
+	enabler zapcore.LevelEnabler
+	fields  []zapcore.Field
+}
+
+func (c *cefCore) Enabled(level zapcore.Level) bool {
+	return c.enabler.Enabled(level)
+}
+
+func (c *cefCore) With(fields []zapcore.Field) zapcore.Core {
+	next := *c
+	next.fields = append(append([]zapcore.Field{}, c.fields...), fields...)
+	return &next
+}
+
+func (c *cefCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Enabled(entry.Level) {
+		return checked.AddCore(entry, c)
+	}
+	return checked
+}
+
+func (c *cefCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
+	allFields := append(append([]zapcore.Field{}, c.fields...), fields...)
+
+	extensions := []string{
+		"end=" + strconv.FormatInt(entry.Time.UnixMilli(), 10),
+		"msg=" + cefEscape(entry.Message),
+		"sourceServiceName=management-plane",
+	}
+	if entry.Caller.Defined {
+		extensions = append(extensions, "cs1Label=caller", "cs1="+cefEscape(entry.Caller.TrimmedPath()))
+	}
+	if entry.Stack != "" {
+		extensions = append(extensions, "cs2Label=stack", "cs2="+cefEscape(entry.Stack))
+	}
+	for _, field := range allFields {
+		key := cefKey(field.Key)
+		if key == "" {
+			continue
+		}
+		extensions = append(extensions, key+"="+cefEscape(cefFieldValue(field)))
+	}
+
+	line := fmt.Sprintf("CEF:0|ApexAegis|ManagementPlane|1.0|%s|%s|%d|%s\n",
+		cefHeaderEscape(entry.Level.String()),
+		cefHeaderEscape(entry.Message),
+		cefSeverity(entry.Level),
+		strings.Join(extensions, " "),
+	)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.out.WriteString(line)
+	return err
+}
+
+func (c *cefCore) Sync() error {
+	return c.out.Sync()
+}
+
+func cefSeverity(level zapcore.Level) int {
+	switch {
+	case level >= zapcore.FatalLevel:
+		return 10
+	case level >= zapcore.ErrorLevel:
+		return 8
+	case level >= zapcore.WarnLevel:
+		return 6
+	case level >= zapcore.InfoLevel:
+		return 3
+	default:
+		return 1
+	}
+}
+
+func cefFieldValue(field zapcore.Field) string {
+	switch field.Type {
+	case zapcore.StringType:
+		return field.String
+	case zapcore.ErrorType:
+		if err, ok := field.Interface.(error); ok && err != nil {
+			return err.Error()
+		}
+	case zapcore.BoolType:
+		return strconv.FormatBool(field.Integer == 1)
+	case zapcore.Int64Type, zapcore.Int32Type, zapcore.Int16Type, zapcore.Int8Type:
+		return strconv.FormatInt(field.Integer, 10)
+	case zapcore.Uint64Type, zapcore.Uint32Type, zapcore.Uint16Type, zapcore.Uint8Type, zapcore.UintptrType:
+		return strconv.FormatUint(uint64(field.Integer), 10)
+	case zapcore.Float64Type:
+		return strconv.FormatFloat(math.Float64frombits(uint64(field.Integer)), 'f', -1, 64)
+	case zapcore.Float32Type:
+		return strconv.FormatFloat(float64(math.Float32frombits(uint32(field.Integer))), 'f', -1, 32)
+	case zapcore.DurationType:
+		return time.Duration(field.Integer).String()
+	case zapcore.TimeType:
+		return time.Unix(0, field.Integer).UTC().Format(time.RFC3339Nano)
+	default:
+		if field.Interface != nil {
+			return fmt.Sprint(field.Interface)
+		}
+	}
+	return field.String
+}
+
+func cefKey(key string) string {
+	var b strings.Builder
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func cefHeaderEscape(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "|", "\\|", "\n", " ", "\r", " ").Replace(value)
+}
+
+func cefEscape(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "=", "\\=", "|", "\\|", "\n", "\\n", "\r", "\\r").Replace(value)
 }

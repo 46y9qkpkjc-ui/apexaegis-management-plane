@@ -25,7 +25,7 @@ COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/management-plane /usr/local/bin/start.sh
 
 ENV MIGRATIONS_DIR=/migrations
-ENV LISTEN_ADDR=:8080
+ENV LISTEN_ADDR=:443
 
-EXPOSE 8080
+EXPOSE 443
 ENTRYPOINT ["/usr/local/bin/start.sh"]

@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -80,11 +82,11 @@ func generateCA(certFile, keyFile string) (*CertificateAuthority, error) {
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			Organization:  []string{"ApexAegis"},
-			CommonName:    "ApexAegis Internal CA",
-			Country:       []string{"SG"},
-			Province:      []string{"Singapore"},
-			Locality:      []string{"Singapore"},
+			Organization: []string{"ApexAegis"},
+			CommonName:   "ApexAegis Internal CA",
+			Country:      []string{"SG"},
+			Province:     []string{"Singapore"},
+			Locality:     []string{"Singapore"},
 		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
@@ -165,6 +167,82 @@ func (ca *CertificateAuthority) IssueCertificate(gatewayID string, hosts []strin
 	keyPEMBlock := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: leafKeyDER})
 
 	return certPEMBlock, keyPEMBlock, nil
+}
+
+// SignDeviceCSR signs a client-generated CSR for endpoint device mTLS.
+// The endpoint keeps the private key locally; the management plane only signs
+// the public key from the CSR and returns a leaf certificate.
+func (ca *CertificateAuthority) SignDeviceCSR(agentID string, csrPEM []byte, validDays int) (certPEM []byte, err error) {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, fmt.Errorf("decode device CSR failed")
+	}
+
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse device CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("verify device CSR signature: %w", err)
+	}
+
+	if validDays <= 0 {
+		validDays = 365
+	}
+	if agentID == "" {
+		agentID = "unknown"
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	commonName := fmt.Sprintf("apexaegis-device-%s", sanitizeCertificateName(agentID))
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization:       []string{"ApexAegis"},
+			OrganizationalUnit: []string{"Device"},
+			CommonName:         commonName,
+		},
+		NotBefore:             time.Now().Add(-5 * time.Minute),
+		NotAfter:              time.Now().Add(time.Duration(validDays) * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              append([]string{}, csr.DNSNames...),
+		IPAddresses:           append([]net.IP{}, csr.IPAddresses...),
+		URIs:                  append([]*url.URL{}, csr.URIs...),
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, csr.PublicKey, ca.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("sign device certificate: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), nil
+}
+
+func sanitizeCertificateName(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-.")
+	if out == "" {
+		return "unknown"
+	}
+	if len(out) > 96 {
+		return out[:96]
+	}
+	return out
 }
 
 // ServerTLSConfig returns a TLS config that requires and verifies client certs

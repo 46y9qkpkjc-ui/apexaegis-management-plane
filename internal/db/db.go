@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,7 @@ type Config struct {
 	// DSN is a CockroachDB Cloud connection string.
 	// Example: "postgresql://user:pass@cluster-name-1234.cockroachlabs.cloud:26257/apexaegis?sslmode=verify-full"
 	DSN             string
+	TenantOrgID     string        // required when RLS is enabled; sets app.current_org_id
 	MaxOpenConns    int           // default 10 (cloud serverless friendly)
 	MaxIdleConns    int           // default 5
 	ConnMaxLifetime time.Duration // default 30m
@@ -46,7 +48,16 @@ func Open(cfg Config, logger *zap.Logger) (*DB, error) {
 		cfg.ConnMaxLifetime = 30 * time.Minute
 	}
 
-	pool, err := sql.Open("pgx", cfg.DSN)
+	dsn := cfg.DSN
+	if cfg.TenantOrgID != "" {
+		var dsnErr error
+		dsn, dsnErr = withTenantSessionOption(cfg.DSN, cfg.TenantOrgID)
+		if dsnErr != nil {
+			return nil, fmt.Errorf("db tenant session config: %w", dsnErr)
+		}
+	}
+
+	pool, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db open: %w", err)
 	}
@@ -67,9 +78,28 @@ func Open(cfg Config, logger *zap.Logger) (*DB, error) {
 	logger.Info("CockroachDB Cloud connected",
 		zap.Int("max_open", cfg.MaxOpenConns),
 		zap.Int("max_idle", cfg.MaxIdleConns),
+		zap.String("tenant_org_id", cfg.TenantOrgID),
 	)
 
 	return &DB{DB: pool, logger: logger}, nil
+}
+
+func withTenantSessionOption(dsn, tenantOrgID string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+
+	q := u.Query()
+	existing := strings.TrimSpace(q.Get("options"))
+	tenantOpt := fmt.Sprintf("-c app.current_org_id=%s", tenantOrgID)
+	if existing != "" {
+		q.Set("options", existing+" "+tenantOpt)
+	} else {
+		q.Set("options", tenantOpt)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // Migrate reads all .sql files from the given directory and applies them

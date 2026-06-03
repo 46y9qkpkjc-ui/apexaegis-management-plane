@@ -24,7 +24,7 @@ type GatewayNode struct {
 	TLSEndpoint   string            `json:"tls_endpoint"`
 	PingEndpoint  string            `json:"ping_endpoint"`
 	Version       string            `json:"version"`
-	Status        string            `json:"status"` // online, offline, degraded, draining
+	Status        string            `json:"status"`      // online, offline, degraded, draining
 	DeployMode    string            `json:"deploy_mode"` // cloud, on_prem, hybrid
 	MTLSIssued    bool              `json:"mtls_issued"`
 	CertNotAfter  *time.Time        `json:"cert_not_after,omitempty"`
@@ -230,7 +230,7 @@ func (r *Registry) StartCleanupLoop(ctx context.Context) {
 		case <-ticker.C:
 			r.mu.Lock()
 			for id, gw := range r.gateways {
-				if time.Since(gw.LastHeartbeat) > 5*time.Minute {
+				if time.Since(gw.LastHeartbeat) > 5*time.Minute && gw.Status != "offline" {
 					gw.Status = "offline"
 					r.logger.Warn("Gateway marked offline (no heartbeat)",
 						zap.String("id", id),

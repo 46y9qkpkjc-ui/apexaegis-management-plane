@@ -157,6 +157,7 @@ type IdPConfig struct {
 	// SCIM provisioning
 	SCIMEnabled  bool   `json:"scim_enabled"`
 	SCIMEndpoint string `json:"scim_endpoint,omitempty"`
+	SCIMToken    string `json:"scim_token,omitempty"` // write-only; stored as hash and never returned
 
 	// Attribute mapping (IdP claim → unified attribute)
 	AttributeMap map[string]string `json:"attribute_map,omitempty"`
@@ -241,6 +242,7 @@ type IdPDBRecord struct {
 	KerberosRealm   string
 	SCIMEnabled     bool
 	SCIMEndpoint    string
+	SCIMToken       string
 	AttributeMap    map[string]string
 	GroupMap        map[string]string
 }
@@ -310,7 +312,7 @@ func idpConfigToDBRecord(cfg *IdPConfig) *IdPDBRecord {
 		SAMLEntityID: cfg.SAMLEntityID, SAMLSSOURL: cfg.SAMLSSOURL,
 		SAMLCertificate: cfg.SAMLCertificate,
 		KerberosEnabled: cfg.KerberosEnabled, KerberosRealm: cfg.KerberosRealm,
-		SCIMEnabled: cfg.SCIMEnabled, SCIMEndpoint: cfg.SCIMEndpoint,
+		SCIMEnabled: cfg.SCIMEnabled, SCIMEndpoint: cfg.SCIMEndpoint, SCIMToken: cfg.SCIMToken,
 		AttributeMap: cfg.AttributeMap, GroupMap: cfg.GroupMap,
 	}
 }
@@ -389,6 +391,7 @@ func (b *Broker) ListIdPs() []IdPConfig {
 	for _, idp := range b.idps {
 		copy := *idp
 		copy.ClientSecret = "" // never expose secrets in list responses
+		copy.SCIMToken = ""    // write-only; stored as hash
 		result = append(result, copy)
 	}
 	return result
@@ -403,6 +406,7 @@ func (b *Broker) GetIdP(id string) (*IdPConfig, bool) {
 	}
 	copy := *idp
 	copy.ClientSecret = "" // never expose secrets
+	copy.SCIMToken = ""    // write-only; stored as hash
 	return &copy, true
 }
 

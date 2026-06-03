@@ -218,24 +218,6 @@ WHERE status != 'terminated'
 GROUP BY asg_name, region;
 
 -- ============================================================
--- FUNCTIONS
+-- UPDATED_AT HANDLING
 -- ============================================================
-
--- Auto-update updated_at
-CREATE OR REPLACE FUNCTION system_mgmt.update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_organizations_updated_at ON system_mgmt.organizations;
-CREATE TRIGGER trg_organizations_updated_at
-    BEFORE UPDATE ON system_mgmt.organizations
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
-
-DROP TRIGGER IF EXISTS trg_users_updated_at ON system_mgmt.users;
-CREATE TRIGGER trg_users_updated_at
-    BEFORE UPDATE ON system_mgmt.users
-    FOR EACH ROW EXECUTE FUNCTION system_mgmt.update_updated_at();
+-- CockroachDB migrations stay DDL-only; stores update updated_at explicitly.

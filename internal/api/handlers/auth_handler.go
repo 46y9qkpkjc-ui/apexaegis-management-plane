@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -40,6 +41,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
 		return
 	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
 	result, err := h.auth.Authenticate(
 		c.Request.Context(),
@@ -50,7 +52,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	)
 	if err != nil {
 		h.logger.Warn("login failed", zap.String("email", req.Email), zap.String("ip", c.ClientIP()))
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
 	}
 

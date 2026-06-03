@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 type SSOHandler struct {
 	broker     *identity.Broker
 	auth       *db.AuthStore
+	scim       *db.SCIMStore
 	logger     *zap.Logger
 	httpClient *http.Client
 
@@ -36,14 +38,17 @@ type SSOHandler struct {
 type pendingAuth struct {
 	IdPID       string
 	RedirectURI string
+	CallbackURI string
+	Audience    string
 	CreatedAt   time.Time
 }
 
 // NewSSOHandler creates a new SSO handler.
-func NewSSOHandler(broker *identity.Broker, auth *db.AuthStore, logger *zap.Logger) *SSOHandler {
+func NewSSOHandler(broker *identity.Broker, auth *db.AuthStore, scim *db.SCIMStore, logger *zap.Logger) *SSOHandler {
 	h := &SSOHandler{
 		broker:     broker,
 		auth:       auth,
+		scim:       scim,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		pending:    make(map[string]*pendingAuth),
@@ -82,21 +87,20 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 	}
 	state := base64.RawURLEncoding.EncodeToString(stateBytes)
 
-	// Determine redirect URI — caller can override, default to web-ui callback
-	redirectURI := c.Query("redirect_uri")
-	if redirectURI == "" {
-		redirectURI = c.Query("origin")
-		if redirectURI == "" {
-			redirectURI = fmt.Sprintf("%s://%s", scheme(c), c.Request.Host)
-		}
-		redirectURI += "/login?sso_callback=1"
+	audience := strings.TrimSpace(c.Query("audience"))
+	redirectURI := webLoginURL(c)
+	if audience == "user_portal" {
+		redirectURI = portalLoginURL()
 	}
+	callbackURI := callbackURL(c)
 
 	// Store pending state
 	h.mu.Lock()
 	h.pending[state] = &pendingAuth{
 		IdPID:       idpID,
 		RedirectURI: redirectURI,
+		CallbackURI: callbackURI,
+		Audience:    audience,
 		CreatedAt:   time.Now(),
 	}
 	h.mu.Unlock()
@@ -114,7 +118,7 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 		"client_id":     {idp.ClientID},
 		"response_type": {"code"},
 		"scope":         {strings.Join(scopes, " ")},
-		"redirect_uri":  {callbackURL(c)},
+		"redirect_uri":  {callbackURI},
 		"state":         {state},
 	}
 
@@ -143,13 +147,23 @@ func (h *SSOHandler) CallbackRedirect(c *gin.Context) {
 		return
 	}
 
-	dest := url.URL{
-		Path: "/login",
-		RawQuery: url.Values{
-			"code":  {code},
-			"state": {state},
-		}.Encode(),
+	h.mu.Lock()
+	pending, ok := h.pending[state]
+	h.mu.Unlock()
+	if !ok || time.Since(pending.CreatedAt) > 10*time.Minute {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired state parameter"})
+		return
 	}
+
+	dest, err := url.Parse(pending.RedirectURI)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect target"})
+		return
+	}
+	query := dest.Query()
+	query.Set("code", code)
+	query.Set("state", state)
+	dest.RawQuery = query.Encode()
 	c.Redirect(http.StatusFound, dest.String())
 }
 
@@ -194,7 +208,7 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 
 	// Exchange code for tokens at IdP token endpoint
 	tokenEndpoint := resolveTokenEndpoint(idp)
-	tokenResp, err := h.exchangeCode(c.Request.Context(), idp, tokenEndpoint, req.Code, callbackURL(c))
+	tokenResp, err := h.exchangeCode(c.Request.Context(), idp, tokenEndpoint, req.Code, pending.CallbackURI)
 	if err != nil {
 		h.logger.Error("Token exchange failed", zap.String("idp", idp.Name), zap.Error(err))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "token exchange failed"})
@@ -225,7 +239,42 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	// Find or create user in database
+	if pending.Audience == "user_portal" {
+		if h.scim == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user portal authentication is unavailable"})
+			return
+		}
+		user, err := h.scim.FindAndLinkProvisionedClientUser(
+			c.Request.Context(),
+			idp.ProviderType,
+			subject,
+			email,
+			idp.OrgID,
+		)
+		if err != nil {
+			h.logger.Error("Client user lookup/creation failed", zap.Error(err))
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if user.Status != "active" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account is suspended"})
+			return
+		}
+		result, err := h.auth.IssuePortalToken(user)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "token issuance failed"})
+			return
+		}
+		h.logger.Info("User portal SSO login successful",
+			zap.String("idp", idp.Name),
+			zap.String("email", user.Email),
+			zap.String("user_id", user.ID),
+		)
+		c.JSON(http.StatusOK, result)
+		return
+	}
+
+	// Find or create administrator user in database
 	user, created, err := h.auth.FindOrCreateOAuthUser(
 		c.Request.Context(),
 		idp.ProviderType,
@@ -261,6 +310,13 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, result)
+}
+
+func portalLoginURL() string {
+	if configured := strings.TrimSpace(os.Getenv("USER_PORTAL_LOGIN_URL")); configured != "" {
+		return configured
+	}
+	return "https://users.apexaegis.app"
 }
 
 // ListSSOProviders returns IdPs available for SSO login (public endpoint).
@@ -354,25 +410,43 @@ func resolveTokenEndpoint(idp *identity.IdPConfig) string {
 }
 
 func callbackURL(c *gin.Context) string {
-	// In dev the browser hits Next.js on :3000 which proxies to :9090,
-	// so c.Request.Host is :9090 — not reachable by the browser.
-	// Prefer the Origin header (set by the frontend fetch) to build a
-	// redirect URI the browser can actually follow.
 	const path = "/api/v1/auth/sso/callback"
-	if origin := c.GetHeader("Origin"); origin != "" {
-		return origin + path
+	if base := publicAPIBaseURL(); base != "" {
+		return strings.TrimRight(base, "/") + path
 	}
-	// Browsers may omit Origin on same-origin GET; fall back to Referer.
-	if referer := c.GetHeader("Referer"); referer != "" {
-		if u, err := url.Parse(referer); err == nil {
-			return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, path)
-		}
-	}
-	// Next.js / nginx may set X-Forwarded-Host.
 	if fwdHost := c.GetHeader("X-Forwarded-Host"); fwdHost != "" {
 		return fmt.Sprintf("%s://%s%s", scheme(c), fwdHost, path)
 	}
 	return fmt.Sprintf("%s://%s%s", scheme(c), c.Request.Host, path)
+}
+
+func publicAPIBaseURL() string {
+	for _, key := range []string{"PUBLIC_API_URL", "API_PUBLIC_BASE_URL", "MANAGEMENT_PUBLIC_URL"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	if os.Getenv("DEPLOY_MODE") == "cloud" {
+		return "https://api.apexaegis.app"
+	}
+	return ""
+}
+
+func webLoginURL(c *gin.Context) string {
+	base := strings.TrimRight(c.Query("origin"), "/")
+	if base == "" {
+		base = strings.TrimRight(c.GetHeader("Origin"), "/")
+	}
+	if base == "" {
+		base = strings.TrimRight(os.Getenv("WEB_UI_PUBLIC_URL"), "/")
+	}
+	if base == "" && os.Getenv("DEPLOY_MODE") == "cloud" {
+		base = "https://www.apexaegis.app"
+	}
+	if base == "" {
+		base = fmt.Sprintf("%s://%s", scheme(c), c.Request.Host)
+	}
+	return base + "/login"
 }
 
 func scheme(c *gin.Context) string {

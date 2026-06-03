@@ -2,11 +2,14 @@ package security
 
 import (
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"sync"
 	"time"
 
+	pkiauth "github.com/zcp/management-plane/internal/auth"
 	"go.uber.org/zap"
 )
 
@@ -60,19 +63,46 @@ type EnrollAgentRequest struct {
 	DeviceArch string `json:"device_arch"`
 }
 
+// EnrollDeviceCertificateRequest enrolls a device and signs a client-generated CSR.
+type EnrollDeviceCertificateRequest struct {
+	Token      string `json:"token" binding:"required"`
+	DeviceName string `json:"device_name" binding:"required"`
+	DeviceOS   string `json:"device_os" binding:"required"`
+	DeviceArch string `json:"device_arch"`
+	CSRPEM     string `json:"csr_pem" binding:"required"`
+	ValidDays  int    `json:"valid_days"`
+}
+
+// EnrollDeviceCertificateResponse is returned once after successful enrollment.
+type EnrollDeviceCertificateResponse struct {
+	AgentID    string    `json:"agent_id"`
+	CertPEM    string    `json:"cert_pem"`
+	CACertPEM  string    `json:"ca_cert_pem"`
+	NotAfter   time.Time `json:"not_after"`
+	GroupID    string    `json:"group_id"`
+	GroupName  string    `json:"group_name"`
+	DeviceName string    `json:"device_name"`
+}
+
 // EnrollmentService manages one-time enrollment tokens and agent registration.
 type EnrollmentService struct {
 	mu     sync.RWMutex
 	tokens map[string]*EnrollmentToken
 	agents map[string]*EnrolledAgent
+	ca     *pkiauth.CertificateAuthority
 	logger *zap.Logger
 }
 
 // NewEnrollmentService creates a new enrollment token service.
-func NewEnrollmentService(logger *zap.Logger) *EnrollmentService {
+func NewEnrollmentService(logger *zap.Logger, ca ...*pkiauth.CertificateAuthority) *EnrollmentService {
+	var certificateAuthority *pkiauth.CertificateAuthority
+	if len(ca) > 0 {
+		certificateAuthority = ca[0]
+	}
 	return &EnrollmentService{
 		tokens: make(map[string]*EnrollmentToken),
 		agents: make(map[string]*EnrolledAgent),
+		ca:     certificateAuthority,
 		logger: logger,
 	}
 }
@@ -181,6 +211,58 @@ func (s *EnrollmentService) EnrollAgent(req EnrollAgentRequest) (*EnrolledAgent,
 		zap.String("token_id", token.ID),
 	)
 	return agent, nil
+}
+
+// EnrollDeviceCertificate validates an enrollment token, registers the device,
+// signs the supplied CSR, and returns the device certificate plus issuing CA.
+func (s *EnrollmentService) EnrollDeviceCertificate(req EnrollDeviceCertificateRequest) (*EnrollDeviceCertificateResponse, error) {
+	if s.ca == nil {
+		return nil, fmt.Errorf("device certificate authority is not configured")
+	}
+	agent, err := s.EnrollAgent(EnrollAgentRequest{
+		Token:      req.Token,
+		DeviceName: req.DeviceName,
+		DeviceOS:   req.DeviceOS,
+		DeviceArch: req.DeviceArch,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	validDays := req.ValidDays
+	if validDays <= 0 {
+		validDays = 365
+	}
+	if validDays > 825 {
+		validDays = 825
+	}
+
+	certPEM, err := s.ca.SignDeviceCSR(agent.ID, []byte(req.CSRPEM), validDays)
+	if err != nil {
+		return nil, err
+	}
+	notAfter := time.Now().Add(time.Duration(validDays) * 24 * time.Hour)
+	if block, _ := pem.Decode(certPEM); block != nil {
+		if cert, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil {
+			notAfter = cert.NotAfter
+		}
+	}
+
+	s.logger.Info("Device certificate issued",
+		zap.String("agent_id", agent.ID),
+		zap.String("device", req.DeviceName),
+		zap.String("group_id", agent.GroupID),
+		zap.Time("not_after", notAfter),
+	)
+	return &EnrollDeviceCertificateResponse{
+		AgentID:    agent.ID,
+		CertPEM:    string(certPEM),
+		CACertPEM:  string(s.ca.GetCACertPEM()),
+		NotAfter:   notAfter,
+		GroupID:    agent.GroupID,
+		GroupName:  agent.GroupName,
+		DeviceName: agent.DeviceName,
+	}, nil
 }
 
 // ListTokens returns all enrollment tokens.

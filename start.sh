@@ -13,12 +13,14 @@ if [[ -z "${PGSSLROOTCERT:-}" && -f "/etc/ssl/certs/root.crt" ]]; then
   export PGSSLROOTCERT=/etc/ssl/certs/root.crt
 fi
 
-# Ensure LISTEN_ADDR uses PORT if provided (Railway sets PORT)
-export LISTEN_ADDR="${LISTEN_ADDR:-:${PORT:-8080}}"
+# Ensure LISTEN_ADDR uses PORT if provided (some platforms inject PORT)
+export LISTEN_ADDR="${LISTEN_ADDR:-:${PORT:-443}}"
 
-echo "Starting management-plane..."
-echo "  LISTEN_ADDR: $LISTEN_ADDR"
-echo "  DEPLOY_MODE: ${DEPLOY_MODE:-cloud}"
+cef_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/=/\\=/g' -e 's/|/\\|/g'
+}
+
+echo "CEF:0|ApexAegis|ManagementPlane|1.0|startup|Starting management-plane|3|sourceServiceName=management-plane listenAddr=$(cef_escape "$LISTEN_ADDR") deployMode=$(cef_escape "${DEPLOY_MODE:-cloud}")"
 
 # Migrations run automatically inside the binary via dbConn.Migrate() on startup
 exec /usr/local/bin/management-plane
