@@ -35,6 +35,25 @@ type IssuedDeviceCertificate struct {
 	NotAfter       time.Time
 }
 
+func IsDeviceCSRValidationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return message == "a PEM-encoded certificate signing request is required" ||
+		message == "certificate signing request is invalid" ||
+		message == "certificate signing request common name must match device_id" ||
+		message == "certificate signing request organization must match tenant_id"
+}
+
+func decodeCertificateRequest(csrPEM string) (*pem.Block, error) {
+	block, _ := pem.Decode([]byte(csrPEM))
+	if block == nil || (block.Type != "CERTIFICATE REQUEST" && block.Type != "NEW CERTIFICATE REQUEST") {
+		return nil, errors.New("a PEM-encoded certificate signing request is required")
+	}
+	return block, nil
+}
+
 func NewAWSPrivateCA(ctx context.Context) (*AWSPrivateCA, error) {
 	caARN := strings.TrimSpace(os.Getenv("DEVICE_CERTIFICATE_AUTHORITY_ARN"))
 	if caARN == "" {
@@ -61,9 +80,9 @@ func NewAWSPrivateCA(ctx context.Context) (*AWSPrivateCA, error) {
 }
 
 func (s *AWSPrivateCA) IssueDeviceCertificate(ctx context.Context, csrPEM, orgID, deviceID string, validDays int) (*IssuedDeviceCertificate, error) {
-	block, _ := pem.Decode([]byte(csrPEM))
-	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return nil, errors.New("a PEM-encoded certificate signing request is required")
+	block, err := decodeCertificateRequest(csrPEM)
+	if err != nil {
+		return nil, err
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil || csr.CheckSignature() != nil {

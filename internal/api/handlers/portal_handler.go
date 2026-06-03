@@ -63,7 +63,15 @@ func (h *PortalHandler) IssueDeviceCertificate(c *gin.Context) {
 		req.ValidDays,
 	)
 	if err != nil {
-		h.logger.Error("AWS Private CA device certificate issuance failed", zap.Error(err))
+		h.logger.Error("AWS Private CA device certificate issuance failed",
+			zap.String("org_id", c.GetString("org_id")),
+			zap.String("device_id", req.DeviceID),
+			zap.Error(err),
+		)
+		if security.IsDeviceCSRValidationError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "device certificate issuance failed"})
 		return
 	}
