@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -812,7 +813,7 @@ func main() {
 
 	// Start cmux dispatcher
 	go func() {
-		if err := mux.Serve(); err != nil {
+		if err := mux.Serve(); err != nil && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
 			logger.Error("cmux error", zap.Error(err))
 		}
 	}()

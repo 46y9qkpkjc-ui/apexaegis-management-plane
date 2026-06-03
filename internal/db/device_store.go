@@ -11,6 +11,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var ErrDeviceLicenseLimitReached = errors.New("device license limit reached")
+
 // DeviceRegistration is the production mTLS device identity record.
 type DeviceRegistration struct {
 	ID                    string
@@ -196,7 +198,41 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 		return nil, errors.New("org_id, device_id, and certificate fingerprint are required")
 	}
 
-	err := s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin device registration: %w", err)
+	}
+	defer tx.Rollback()
+
+	var subscriptionLicenses, activeDevices int
+	var existingActive bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(org.subscription_licenses, 0),
+		       (SELECT count(*)
+		          FROM system_mgmt.devices d
+		         WHERE d.org_id = org.id AND d.status = 'active'),
+		       EXISTS (
+		         SELECT 1
+		           FROM system_mgmt.devices d
+		          WHERE d.org_id = org.id
+		            AND d.device_id = $2
+		            AND d.status = 'active'
+		       )
+		  FROM system_mgmt.organizations org
+		 WHERE org.id = $1
+		 FOR UPDATE
+	`, reg.OrgID, reg.DeviceID).Scan(&subscriptionLicenses, &activeDevices, &existingActive)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("organization not found")
+		}
+		return nil, fmt.Errorf("check device license availability: %w", err)
+	}
+	if !existingActive && activeDevices >= subscriptionLicenses {
+		return nil, ErrDeviceLicenseLimitReached
+	}
+
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO system_mgmt.devices (
 			org_id, device_id, device_name, os_type,
 			machine_cert_thumbprint, mtls_cert_subject, mtls_cert_serial,
@@ -224,11 +260,18 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 		return nil, fmt.Errorf("register mtls device: %w", err)
 	}
 
-	if err := s.RefreshLicenseConsumption(ctx, reg.OrgID); err != nil {
-		s.logger.Warn("failed to refresh license consumption after device registration",
-			zap.String("org_id", reg.OrgID),
-			zap.Error(err),
-		)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE system_mgmt.organizations
+		   SET licenses_consumed = (
+		     SELECT count(*) FROM system_mgmt.devices
+		      WHERE org_id = $1 AND status = 'active'
+		   )
+		 WHERE id = $1
+	`, reg.OrgID); err != nil {
+		return nil, fmt.Errorf("refresh license consumption: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit device registration: %w", err)
 	}
 	return &reg, nil
 }

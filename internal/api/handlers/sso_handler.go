@@ -316,7 +316,7 @@ func portalLoginURL() string {
 	if configured := strings.TrimSpace(os.Getenv("USER_PORTAL_LOGIN_URL")); configured != "" {
 		return configured
 	}
-	return "https://users.apexaegis.app/login"
+	return "https://users.apexaegis.app"
 }
 
 // ListSSOProviders returns IdPs available for SSO login (public endpoint).

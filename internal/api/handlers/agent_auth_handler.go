@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,6 +36,8 @@ type agentAuthRequest struct {
 
 type mtlsClientIdentity struct {
 	Subject              string
+	CommonName           string
+	Organizations        []string
 	Serial               string
 	FingerprintSHA256    string
 	NotAfter             time.Time
@@ -63,6 +66,10 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "device mTLS certificate is required"})
 		return
 	}
+	if identity.CommonName != deviceID || !contains(identity.Organizations, req.TenantID) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device certificate identity does not match tenant_id and device_id"})
+		return
+	}
 
 	reg, err := h.deviceStore.RegisterMTLSDevice(c.Request.Context(), db.DeviceRegistration{
 		OrgID:                 req.TenantID,
@@ -76,11 +83,20 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 	})
 	if err != nil {
 		h.logger.Warn("agent mTLS registration failed", zap.String("device_id", deviceID), zap.Error(err))
+		if errors.Is(err, db.ErrDeviceLicenseLimitReached) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": "device license limit reached"})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
-	jwt, expiresAt, err := h.authStore.IssueAgentToken(req.TenantID, reg.ID)
+	jwt, expiresAt, err := h.authStore.IssueAgentToken(
+		req.TenantID,
+		reg.ID,
+		identity.FingerprintSHA256,
+		identity.Serial,
+	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
@@ -120,6 +136,8 @@ func clientCertificateIdentity(req *http.Request) *mtlsClientIdentity {
 		fingerprint := sha256.Sum256(cert.Raw)
 		return &mtlsClientIdentity{
 			Subject:              cert.Subject.String(),
+			CommonName:           cert.Subject.CommonName,
+			Organizations:        cert.Subject.Organization,
 			Serial:               cert.SerialNumber.String(),
 			FingerprintSHA256:    hex.EncodeToString(fingerprint[:]),
 			NotAfter:             cert.NotAfter,
@@ -129,19 +147,25 @@ func clientCertificateIdentity(req *http.Request) *mtlsClientIdentity {
 
 	subject := decodeHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Subject"))
 	serial := decodeHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Serial-Number"))
-	leaf := decodeHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	leaf := decodeHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Leaf"))
+	if leaf == "" {
+		leaf = decodeHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	}
 	if subject == "" && serial == "" && leaf == "" {
 		return nil
 	}
 
 	fingerprint := req.Header.Get("X-Amzn-Mtls-Clientcert-Fingerprint")
 	notAfter := time.Now().Add(365 * 24 * time.Hour)
+	commonName, organizations := certificateSubjectIdentity(subject)
 	if leaf != "" {
-		sum := sha256.Sum256([]byte(leaf))
-		fingerprint = hex.EncodeToString(sum[:])
 		if block, _ := pem.Decode([]byte(leaf)); block != nil {
 			if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+				sum := sha256.Sum256(cert.Raw)
+				fingerprint = hex.EncodeToString(sum[:])
 				notAfter = cert.NotAfter
+				commonName = cert.Subject.CommonName
+				organizations = cert.Subject.Organization
 				if subject == "" {
 					subject = cert.Subject.String()
 				}
@@ -157,17 +181,48 @@ func clientCertificateIdentity(req *http.Request) *mtlsClientIdentity {
 	}
 	return &mtlsClientIdentity{
 		Subject:           subject,
+		CommonName:        commonName,
+		Organizations:     organizations,
 		Serial:            serial,
 		FingerprintSHA256: fingerprint,
 		NotAfter:          notAfter,
 	}
 }
 
+func certificateSubjectIdentity(subject string) (string, []string) {
+	commonName := ""
+	organizations := []string{}
+	for _, component := range strings.Split(subject, ",") {
+		parts := strings.SplitN(strings.TrimSpace(component), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(parts[0])) {
+		case "CN":
+			commonName = strings.TrimSpace(parts[1])
+		case "O":
+			organizations = append(organizations, strings.TrimSpace(parts[1]))
+		}
+	}
+	return commonName, organizations
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func decodeHeader(value string) string {
 	if value == "" {
 		return ""
 	}
-	decoded, err := url.QueryUnescape(value)
+	// ALB mTLS certificate headers are percent-encoded, but PEM base64 may
+	// contain literal '+' characters that must not be treated as spaces.
+	decoded, err := url.PathUnescape(value)
 	if err != nil {
 		return strings.TrimSpace(value)
 	}

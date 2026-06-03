@@ -55,7 +55,13 @@ func (h *PortalHandler) IssueDeviceCertificate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id, device_name, os_type, and csr_pem are required"})
 		return
 	}
-	issued, err := h.pca.IssueDeviceCertificate(c.Request.Context(), req.CSRPEM, req.ValidDays)
+	issued, err := h.pca.IssueDeviceCertificate(
+		c.Request.Context(),
+		req.CSRPEM,
+		c.GetString("org_id"),
+		req.DeviceID,
+		req.ValidDays,
+	)
 	if err != nil {
 		h.logger.Error("AWS Private CA device certificate issuance failed", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "device certificate issuance failed"})

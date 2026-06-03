@@ -333,17 +333,20 @@ func deviceCertificateIdentity(req *http.Request) *deviceMTLSIdentity {
 
 	subject := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Subject"))
 	serial := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Serial-Number"))
-	leaf := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	leaf := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Leaf"))
+	if leaf == "" {
+		leaf = decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	}
 	if subject == "" && serial == "" && leaf == "" {
 		return nil
 	}
 
 	fingerprint := strings.TrimSpace(req.Header.Get("X-Amzn-Mtls-Clientcert-Fingerprint"))
 	if leaf != "" {
-		sum := sha256.Sum256([]byte(leaf))
-		fingerprint = hex.EncodeToString(sum[:])
 		if block, _ := pem.Decode([]byte(leaf)); block != nil {
 			if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+				sum := sha256.Sum256(cert.Raw)
+				fingerprint = hex.EncodeToString(sum[:])
 				if subject == "" {
 					subject = cert.Subject.String()
 				}
@@ -364,7 +367,9 @@ func decodeMTLSHeader(value string) string {
 	if value == "" {
 		return ""
 	}
-	decoded, err := url.QueryUnescape(value)
+	// ALB mTLS certificate headers are percent-encoded, but PEM base64 may
+	// contain literal '+' characters that must not be treated as spaces.
+	decoded, err := url.PathUnescape(value)
 	if err != nil {
 		return strings.TrimSpace(value)
 	}

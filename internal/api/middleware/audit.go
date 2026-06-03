@@ -20,12 +20,16 @@ func AuditMiddleware(auditLog *audit.AuditLog) gin.HandlerFunc {
 
 		// Build audit entry from request context
 		status := c.Writer.Status()
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
 		entry := audit.AuditEntry{
 			ID:        fmt.Sprintf("aud-%s-%d", c.GetString("request_id"), start.UnixMicro()),
 			Timestamp: start.UTC(),
 			Actor:     actor(c),
 			ActorIP:   c.ClientIP(),
-			Resource:  c.Request.Method + " " + c.FullPath(),
+			Resource:  c.Request.Method + " " + path,
 			Action:    httpAction(c.Request.Method),
 			OrgID:     c.GetString("org_id"),
 			RequestID: c.GetString("request_id"),
@@ -33,7 +37,7 @@ func AuditMiddleware(auditLog *audit.AuditLog) gin.HandlerFunc {
 		}
 
 		// Classify event type from route
-		entry.EventType = classifyRoute(c.FullPath())
+		entry.EventType = classifyRoute(path)
 		entry.Severity = classifySeverity(c.Request.Method, status)
 
 		// Capture error details (safe — no tracebacks)

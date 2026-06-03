@@ -60,7 +60,7 @@ func NewAWSPrivateCA(ctx context.Context) (*AWSPrivateCA, error) {
 	}, nil
 }
 
-func (s *AWSPrivateCA) IssueDeviceCertificate(ctx context.Context, csrPEM string, validDays int) (*IssuedDeviceCertificate, error) {
+func (s *AWSPrivateCA) IssueDeviceCertificate(ctx context.Context, csrPEM, orgID, deviceID string, validDays int) (*IssuedDeviceCertificate, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, errors.New("a PEM-encoded certificate signing request is required")
@@ -68,6 +68,12 @@ func (s *AWSPrivateCA) IssueDeviceCertificate(ctx context.Context, csrPEM string
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil || csr.CheckSignature() != nil {
 		return nil, errors.New("certificate signing request is invalid")
+	}
+	if strings.TrimSpace(deviceID) == "" || csr.Subject.CommonName != deviceID {
+		return nil, errors.New("certificate signing request common name must match device_id")
+	}
+	if strings.TrimSpace(orgID) == "" || !containsString(csr.Subject.Organization, orgID) {
+		return nil, errors.New("certificate signing request organization must match tenant_id")
 	}
 	if validDays <= 0 {
 		validDays = 365
@@ -129,6 +135,15 @@ func (s *AWSPrivateCA) IssueDeviceCertificate(ctx context.Context, csrPEM string
 		Fingerprint:    certificateFingerprint(cert.Raw),
 		NotAfter:       cert.NotAfter,
 	}, nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func certificateFingerprint(raw []byte) string {
