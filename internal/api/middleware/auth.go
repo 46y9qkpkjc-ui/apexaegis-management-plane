@@ -215,6 +215,33 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 	}
 }
 
+// RequireWriteAccess lets read-only administrators inspect state but blocks
+// unsafe mutations unless the JWT role is allowed to administer the tenant.
+func RequireWriteAccess() gin.HandlerFunc {
+	allowed := map[string]bool{
+		"super_admin":    true,
+		"org_admin":      true,
+		"security_admin": true,
+	}
+
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+
+		role := strings.TrimSpace(c.GetString("role"))
+		if !allowed[role] {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "write access requires an administrator role",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // MTLSIdentity extracts the gateway identity from a verified mTLS client certificate.
 func MTLSIdentity() gin.HandlerFunc {
 	return func(c *gin.Context) {

@@ -266,6 +266,7 @@ func main() {
 	// User Management API (admin-only)
 	userAPI := router.Group("/api/v1/users")
 	userAPI.Use(middleware.JWTAuth(authStore))
+	userAPI.Use(middleware.RequireWriteAccess())
 	{
 		userHandler := handlers.NewUserHandler(authStore, logger)
 		userAPI.GET("", userHandler.ListUsers)
@@ -277,6 +278,7 @@ func main() {
 	// Client Users API (admin-only — manage endpoint users from web UI)
 	clientAPI := router.Group("/api/v1/client-users")
 	clientAPI.Use(middleware.JWTAuth(authStore))
+	clientAPI.Use(middleware.RequireWriteAccess())
 	{
 		clientAPI.GET("", func(c *gin.Context) {
 			filter := c.Query("search")
@@ -295,6 +297,7 @@ func main() {
 	// Device Inventory API (admin-only — mTLS registered endpoint devices)
 	deviceAPI := router.Group("/api/v1/devices")
 	deviceAPI.Use(middleware.JWTAuth(authStore))
+	deviceAPI.Use(middleware.RequireWriteAccess())
 	{
 		deviceHandler := handlers.NewDeviceHandler(deviceStore, logger)
 		deviceAPI.GET("", deviceHandler.ListDevices)
@@ -393,6 +396,7 @@ func main() {
 	// P2P Mesh API (authenticated by client JWT)
 	meshAPI := router.Group("/api/v1/mesh")
 	meshAPI.Use(middleware.JWTAuth(authStore))
+	meshAPI.Use(middleware.RequireWriteAccess())
 	{
 		meshHandler := handlers.NewMeshHandler(meshCoordinator, logger)
 		meshAPI.POST("/peers/register", meshHandler.RegisterPeer)
@@ -406,6 +410,7 @@ func main() {
 	// Management API (admin UI)
 	adminAPI := router.Group("/api/v1/admin")
 	adminAPI.Use(middleware.JWTAuth(authStore))
+	adminAPI.Use(middleware.RequireWriteAccess())
 	{
 		adminHandler := handlers.NewAdminHandler(gwRegistry, policyStore, meshCoordinator, logger)
 		adminAPI.GET("/gateways", adminHandler.ListGateways)
@@ -458,6 +463,7 @@ func main() {
 	// TLS Scanner & ApexAdversary Outreach API
 	scannerAPI := router.Group("/api/v1/scanner")
 	scannerAPI.Use(middleware.JWTAuth(authStore))
+	scannerAPI.Use(middleware.RequireWriteAccess())
 	{
 		scanHandler := handlers.NewScannerHandler(tlsScanner, outreachEngine, auditLog, logger)
 		scannerAPI.POST("/sources", scanHandler.AddSource)
@@ -476,6 +482,7 @@ func main() {
 	// Audit Logs API
 	auditAPI := router.Group("/api/v1/audit")
 	auditAPI.Use(middleware.JWTAuth(authStore))
+	auditAPI.Use(middleware.RequireWriteAccess())
 	{
 		auditHandler := handlers.NewAuditHandler(auditLog, logger)
 		auditAPI.GET("/logs", auditHandler.ListAuditLogs)
@@ -501,6 +508,7 @@ func main() {
 	// Advanced Security Group Tags (SGT) & Branch Sites API
 	sgtAPI := router.Group("/api/v1/sgt")
 	sgtAPI.Use(middleware.JWTAuth(authStore))
+	sgtAPI.Use(middleware.RequireWriteAccess())
 	{
 		sgtHandler := handlers.NewSegmentHandler(sgtStore, logger)
 		sgtAPI.GET("/tags", sgtHandler.ListTags)
@@ -525,6 +533,7 @@ func main() {
 	// SDN Whitebox Switch Management API
 	sdnAPI := router.Group("/api/v1/sdn")
 	sdnAPI.Use(middleware.JWTAuth(authStore))
+	sdnAPI.Use(middleware.RequireWriteAccess())
 	{
 		sdnHandler := handlers.NewSDNHandler(sdnManager, logger)
 		sdnAPI.GET("/switches", sdnHandler.ListSwitches)
@@ -540,6 +549,7 @@ func main() {
 	// Identity Broker API (IdP federation, token exchange, sessions)
 	idAPI := router.Group("/api/v1/identity")
 	idAPI.Use(middleware.JWTAuth(authStore))
+	idAPI.Use(middleware.RequireWriteAccess())
 	{
 		idHandler := handlers.NewIdentityBrokerHandler(idBroker, idpStore, logger)
 		idAPI.GET("/providers", idHandler.ListIdPs)
@@ -558,6 +568,7 @@ func main() {
 	// Feature Licensing API
 	featureAPI := router.Group("/api/v1/features")
 	featureAPI.Use(middleware.JWTAuth(authStore))
+	featureAPI.Use(middleware.RequireWriteAccess())
 	{
 		featHandler := handlers.NewFeatureHandler(featureStore, orgPlan, logger)
 		featureAPI.GET("", featHandler.ListFeatures)
@@ -569,6 +580,7 @@ func main() {
 	// Security Profiles API
 	profileAPI := router.Group("/api/v1/profiles")
 	profileAPI.Use(middleware.JWTAuth(authStore))
+	profileAPI.Use(middleware.RequireWriteAccess())
 	{
 		profHandler := handlers.NewProfileHandler(profileStore, logger)
 		profileAPI.GET("/:type", profHandler.ListProfiles)
@@ -582,6 +594,7 @@ func main() {
 	// GhostedApps Detection API
 	ghostAPI := router.Group("/api/v1/ghosted-apps")
 	ghostAPI.Use(middleware.JWTAuth(authStore))
+	ghostAPI.Use(middleware.RequireWriteAccess())
 	{
 		ghostHandler := handlers.NewGhostedAppsHandler(logger)
 		ghostAPI.GET("", ghostHandler.ListAgents)
@@ -594,6 +607,7 @@ func main() {
 	clientConfigHandler := handlers.NewClientConfigHandler(clientConfigStore, logger)
 	ccAdminAPI := router.Group("/api/v1/admin/client-config")
 	ccAdminAPI.Use(middleware.JWTAuth(authStore))
+	ccAdminAPI.Use(middleware.RequireWriteAccess())
 	{
 		ccAdminAPI.GET("", clientConfigHandler.ListClientConfigs)
 		ccAdminAPI.GET("/:group_id", clientConfigHandler.GetClientConfig)
@@ -621,6 +635,7 @@ func main() {
 	threatIntelHandler := handlers.NewThreatIntelHandler(threatStore, syncService, logger)
 	threatAPI := router.Group("/api/v1/admin/threat-intel")
 	threatAPI.Use(middleware.JWTAuth(authStore))
+	threatAPI.Use(middleware.RequireWriteAccess())
 	{
 		threatAPI.GET("/sources", threatIntelHandler.ListSources)
 		threatAPI.GET("/stats", threatIntelHandler.GetSourceStats)
@@ -640,6 +655,7 @@ func main() {
 	dnsLogsHandler := handlers.NewDNSLogsHandler(dnsLogStore, logger)
 	dnsLogsAPI := router.Group("/api/v1/admin/dns-logs")
 	dnsLogsAPI.Use(middleware.JWTAuth(authStore))
+	dnsLogsAPI.Use(middleware.RequireWriteAccess())
 	{
 		dnsLogsAPI.GET("", dnsLogsHandler.GetDNSLogs)
 		dnsLogsAPI.GET("/summary", dnsLogsHandler.GetDNSSummary)
@@ -652,6 +668,7 @@ func main() {
 	// Security Validation API (container-based test infrastructure)
 	validationAPI := router.Group("/api/v1/validation")
 	validationAPI.Use(middleware.JWTAuth(authStore))
+	validationAPI.Use(middleware.RequireWriteAccess())
 	{
 		valHandler := handlers.NewValidationHandler(validationEngine, logger)
 		validationAPI.GET("/tests", valHandler.ListTests)
@@ -667,6 +684,7 @@ func main() {
 	// Security API — code signing, enrollment tokens, command signing
 	securityAPI := router.Group("/api/v1/security")
 	securityAPI.Use(middleware.JWTAuth(authStore))
+	securityAPI.Use(middleware.RequireWriteAccess())
 	{
 		secHandler := handlers.NewSecurityHandler(codeSigningSvc, enrollmentSvc, commandSigningSvc, logger)
 
