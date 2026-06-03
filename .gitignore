@@ -22,6 +22,7 @@ management-plane/dev-vault/
 .env
 .env.local
 .env.*.local
+.env.cloud
 !.env.cloud.example
 
 # ── Dependencies ──────────────────────────────────────
@@ -59,6 +60,7 @@ terraform.tfstate*
 *.key
 
 # Terraform variables with secrets
+terraform.tfvars
 terraform.tfvars.local
 *.auto.tfvars
 
@@ -66,6 +68,8 @@ terraform.tfvars.local
 .terraform.lock.hcl
 tfplan
 tfplan.json
+tfplan-*
+server
 
 # Secrets
 tls/
