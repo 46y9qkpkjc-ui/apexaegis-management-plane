@@ -35,4 +35,11 @@ desired_count = 1
 
 # ACM PCA trust store for gateway mTLS — from pca/ workspace output
 gateway_trust_store_arn = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-gateway-trust/5ba7a91caa52647d"
-device_trust_store_arn  = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-gateway-trust/5ba7a91caa52647d"
+device_trust_store_arn  = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-device-trust/04e116d659af2078"
+
+# ACM PCA ARN for issuing client certs to gateways and devices — from pca/ workspace output
+device_certificate_authority_arn = "arn:aws:acm-pca:ap-southeast-1:184353710603:certificate-authority/77c55707-e54a-43a6-b204-cfb03023f5f7"
+
+#ACM PCA siging algorithm for client certs — must match the CA's signing algorithm
+
+device_certificate_signing_algorithm = "SHA256WITHECDSA"

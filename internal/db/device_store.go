@@ -22,6 +22,7 @@ type DeviceRegistration struct {
 	CertSerial            string
 	CertFingerprintSHA256 string
 	CertNotAfter          time.Time
+	ClientUserID          string
 }
 
 // DeviceInventoryItem is the admin-facing inventory row for mTLS registered devices.
@@ -200,8 +201,8 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 			org_id, device_id, device_name, os_type,
 			machine_cert_thumbprint, mtls_cert_subject, mtls_cert_serial,
 			mtls_cert_fingerprint_sha256, mtls_cert_not_after,
-			last_seen, status, metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), 'active', '{}')
+			client_user_id, last_seen, status, metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), 'active', '{}')
 		ON CONFLICT (device_id) DO UPDATE SET
 			device_name = excluded.device_name,
 			os_type = excluded.os_type,
@@ -210,13 +211,14 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 			mtls_cert_serial = excluded.mtls_cert_serial,
 			mtls_cert_fingerprint_sha256 = excluded.mtls_cert_fingerprint_sha256,
 			mtls_cert_not_after = excluded.mtls_cert_not_after,
+			client_user_id = excluded.client_user_id,
 			last_seen = now(),
 			status = 'active',
 			updated_at = now()
 		RETURNING id
 	`, reg.OrgID, reg.DeviceID, reg.DeviceName, reg.OSType,
 		reg.CertFingerprintSHA256, reg.CertSubject, reg.CertSerial,
-		reg.CertFingerprintSHA256, reg.CertNotAfter,
+		reg.CertFingerprintSHA256, reg.CertNotAfter, nilIfEmptyString(reg.ClientUserID),
 	).Scan(&reg.ID)
 	if err != nil {
 		return nil, fmt.Errorf("register mtls device: %w", err)
@@ -229,6 +231,13 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 		)
 	}
 	return &reg, nil
+}
+
+func nilIfEmptyString(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 // RefreshLicenseConsumption recomputes consumed licenses from active mTLS devices.

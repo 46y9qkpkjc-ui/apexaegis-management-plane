@@ -480,6 +480,54 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 	return &u, true, nil
 }
 
+// FindAndLinkProvisionedClientUser resolves an existing SCIM client user and
+// links its OIDC subject. It never creates a user, making it suitable for the
+// self-service portal where SCIM provisioning is required before access.
+func (s *SCIMStore) FindAndLinkProvisionedClientUser(ctx context.Context, provider, subject, email, orgID string) (*SCIMUser, error) {
+	var u SCIMUser
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, org_id, email, name,
+		       COALESCE(department, ''), COALESCE(title, ''),
+		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
+		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
+		       status, created_at, updated_at
+		  FROM system_mgmt.client_users
+		 WHERE org_id = $1
+		   AND (
+		     (oauth_provider = $2 AND oauth_subject = $3)
+		     OR lower(email) = lower($4)
+		   )
+		 ORDER BY CASE WHEN oauth_provider = $2 AND oauth_subject = $3 THEN 0 ELSE 1 END
+		 LIMIT 1
+	`, orgID, provider, subject, email).Scan(
+		&u.ID, &u.OrgID, &u.Email, &u.Name,
+		&u.Department, &u.Title,
+		&u.OAuthProvider, &u.OAuthSubject,
+		&u.SCIMExternalID, &u.IdPID,
+		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("user is not provisioned for the ApexAegis user portal")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find provisioned client user: %w", err)
+	}
+	if u.OAuthProvider != provider || u.OAuthSubject != subject {
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE system_mgmt.client_users
+			   SET oauth_provider = $1, oauth_subject = $2, last_login_at = now()
+			 WHERE id = $3
+		`, provider, subject, u.ID); err != nil {
+			return nil, fmt.Errorf("link provisioned client user: %w", err)
+		}
+		u.OAuthProvider = provider
+		u.OAuthSubject = subject
+	} else {
+		_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.client_users SET last_login_at = now() WHERE id = $1`, u.ID)
+	}
+	return &u, nil
+}
+
 // ─── Groups ─────────────────────────────────────────────────────────
 
 // CreateGroup creates a new group (via SCIM or locally).

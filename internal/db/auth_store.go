@@ -40,6 +40,13 @@ type LoginResult struct {
 	User         AuthUser `json:"user"`
 }
 
+// PortalLoginResult is returned for SCIM client-user portal sessions.
+type PortalLoginResult struct {
+	AccessToken string   `json:"access_token"`
+	ExpiresIn   int64    `json:"expires_in"`
+	User        SCIMUser `json:"user"`
+}
+
 // AuthStore handles user authentication against CockroachDB Cloud.
 type AuthStore struct {
 	db        *DB
@@ -357,6 +364,29 @@ func (s *AuthStore) IssueAgentToken(orgID, deviceID string) (string, time.Time, 
 		return "", time.Time{}, err
 	}
 	return signed, expiresAt, nil
+}
+
+// IssuePortalToken generates a short-lived token for a SCIM-provisioned client
+// user. Portal tokens are intentionally not backed by administrator sessions.
+func (s *AuthStore) IssuePortalToken(u *SCIMUser) (*PortalLoginResult, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"sub":    u.ID,
+		"email":  u.Email,
+		"name":   u.Name,
+		"role":   "client_user",
+		"aud":    "apexaegis-user-portal",
+		"org_id": u.OrgID,
+		"iat":    now.Unix(),
+		"exp":    now.Add(15 * time.Minute).Unix(),
+		"iss":    "apexaegis-management-plane",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.jwtSecret)
+	if err != nil {
+		return nil, errors.New("token generation failed")
+	}
+	return &PortalLoginResult{AccessToken: signed, ExpiresIn: 900, User: *u}, nil
 }
 
 // ListUsers returns all users, optionally filtered by search query.

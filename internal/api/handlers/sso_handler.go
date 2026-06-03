@@ -25,6 +25,7 @@ import (
 type SSOHandler struct {
 	broker     *identity.Broker
 	auth       *db.AuthStore
+	scim       *db.SCIMStore
 	logger     *zap.Logger
 	httpClient *http.Client
 
@@ -38,14 +39,16 @@ type pendingAuth struct {
 	IdPID       string
 	RedirectURI string
 	CallbackURI string
+	Audience    string
 	CreatedAt   time.Time
 }
 
 // NewSSOHandler creates a new SSO handler.
-func NewSSOHandler(broker *identity.Broker, auth *db.AuthStore, logger *zap.Logger) *SSOHandler {
+func NewSSOHandler(broker *identity.Broker, auth *db.AuthStore, scim *db.SCIMStore, logger *zap.Logger) *SSOHandler {
 	h := &SSOHandler{
 		broker:     broker,
 		auth:       auth,
+		scim:       scim,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		pending:    make(map[string]*pendingAuth),
@@ -84,7 +87,11 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 	}
 	state := base64.RawURLEncoding.EncodeToString(stateBytes)
 
+	audience := strings.TrimSpace(c.Query("audience"))
 	redirectURI := webLoginURL(c)
+	if audience == "user_portal" {
+		redirectURI = portalLoginURL()
+	}
 	callbackURI := callbackURL(c)
 
 	// Store pending state
@@ -93,6 +100,7 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 		IdPID:       idpID,
 		RedirectURI: redirectURI,
 		CallbackURI: callbackURI,
+		Audience:    audience,
 		CreatedAt:   time.Now(),
 	}
 	h.mu.Unlock()
@@ -231,7 +239,42 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	// Find or create user in database
+	if pending.Audience == "user_portal" {
+		if h.scim == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user portal authentication is unavailable"})
+			return
+		}
+		user, err := h.scim.FindAndLinkProvisionedClientUser(
+			c.Request.Context(),
+			idp.ProviderType,
+			subject,
+			email,
+			idp.OrgID,
+		)
+		if err != nil {
+			h.logger.Error("Client user lookup/creation failed", zap.Error(err))
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if user.Status != "active" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account is suspended"})
+			return
+		}
+		result, err := h.auth.IssuePortalToken(user)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "token issuance failed"})
+			return
+		}
+		h.logger.Info("User portal SSO login successful",
+			zap.String("idp", idp.Name),
+			zap.String("email", user.Email),
+			zap.String("user_id", user.ID),
+		)
+		c.JSON(http.StatusOK, result)
+		return
+	}
+
+	// Find or create administrator user in database
 	user, created, err := h.auth.FindOrCreateOAuthUser(
 		c.Request.Context(),
 		idp.ProviderType,
@@ -267,6 +310,13 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, result)
+}
+
+func portalLoginURL() string {
+	if configured := strings.TrimSpace(os.Getenv("USER_PORTAL_LOGIN_URL")); configured != "" {
+		return configured
+	}
+	return "https://users.apexaegis.app/login"
 }
 
 // ListSSOProviders returns IdPs available for SSO login (public endpoint).

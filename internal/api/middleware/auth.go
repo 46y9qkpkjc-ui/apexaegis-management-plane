@@ -242,6 +242,21 @@ func RequireWriteAccess() gin.HandlerFunc {
 	}
 }
 
+// RequireRole restricts an API surface to one or more JWT roles.
+func RequireRole(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]bool, len(roles))
+	for _, role := range roles {
+		allowed[strings.TrimSpace(role)] = true
+	}
+	return func(c *gin.Context) {
+		if !allowed[c.GetString("role")] {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+			return
+		}
+		c.Next()
+	}
+}
+
 // MTLSIdentity extracts the gateway identity from a verified mTLS client certificate.
 func MTLSIdentity() gin.HandlerFunc {
 	return func(c *gin.Context) {

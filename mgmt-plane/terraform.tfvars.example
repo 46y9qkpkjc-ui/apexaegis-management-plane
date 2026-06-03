@@ -24,6 +24,14 @@ gateway_trust_store_arn = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710
 # device CA trust bundle used by MDM/Jamf/Intune provisioned device certs.
 device_trust_store_arn = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/REPLACE-ME"
 
+# AWS Private CA used to issue device client-auth certificates from CSRs.
+device_certificate_authority_arn = "arn:aws:acm-pca:ap-southeast-1:184353710603:certificate-authority/REPLACE-ME"
+device_certificate_signing_algorithm = "SHA256WITHECDSA"
+
+# User portal and approved signed installer catalog.
+user_portal_login_url     = "https://users.apexaegis.app"
+user_portal_artifacts_json = "[]"
+
 # Your CockroachDB Cloud connection string (same one in Railway today)
 database_url        = "postgresql://..."
 

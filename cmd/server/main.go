@@ -127,6 +127,14 @@ func main() {
 	}
 	authStore := db.NewAuthStore(dbConn, []byte(jwtSecret), logger)
 
+	var devicePCA *security.AWSPrivateCA
+	if pca, pcaErr := security.NewAWSPrivateCA(ctx); pcaErr != nil {
+		logger.Warn("AWS Private CA device enrollment disabled", zap.Error(pcaErr))
+	} else {
+		devicePCA = pca
+		logger.Info("AWS Private CA device enrollment enabled")
+	}
+
 	// ── SCIM store (admin + client user provisioning) ──
 	scimStore := db.NewSCIMStore(dbConn, logger)
 
@@ -256,11 +264,22 @@ func main() {
 		authAPI.GET("/me", middleware.JWTAuth(authStore), authHandler.Me)
 
 		// SSO/OIDC login flow (Okta, Azure AD, etc.)
-		ssoHandler := handlers.NewSSOHandler(idBroker, authStore, logger)
+		ssoHandler := handlers.NewSSOHandler(idBroker, authStore, scimStore, logger)
 		authAPI.GET("/sso/providers", ssoHandler.ListSSOProviders)
 		authAPI.GET("/sso/:idp_id/authorize", ssoHandler.Authorize)
 		authAPI.GET("/sso/callback", ssoHandler.CallbackRedirect)
 		authAPI.POST("/sso/callback", ssoHandler.Callback)
+	}
+
+	// Self-service user portal API (SCIM client-user JWT only).
+	portalAPI := router.Group("/api/v1/portal")
+	portalAPI.Use(middleware.JWTAuth(authStore))
+	portalAPI.Use(middleware.RequireRole("client_user"))
+	{
+		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, devicePCA, logger)
+		portalAPI.GET("/profile", portalHandler.Profile)
+		portalAPI.GET("/artifacts", portalHandler.Artifacts)
+		portalAPI.POST("/devices/certificates", portalHandler.IssueDeviceCertificate)
 	}
 
 	// User Management API (admin-only)

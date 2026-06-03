@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 
@@ -60,17 +61,26 @@ func (h *ClientRuntimeHandler) GetProfile(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "device tenant context is required"})
 		return
 	}
+	deviceID := c.GetString("device_id")
+	if deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
+		return
+	}
 
-	configs, err := h.clientConfigStore.ListByOrgID(c.Request.Context(), orgID)
-	if err != nil {
-		h.logger.Error("failed to list client configurations", zap.String("org_id", orgID), zap.Error(err))
+	config, err := h.clientConfigStore.GetEffectiveForDevice(c.Request.Context(), orgID, deviceID)
+	if err != nil && err != sql.ErrNoRows {
+		h.logger.Error("failed to resolve effective client configuration",
+			zap.String("org_id", orgID),
+			zap.String("device_id", deviceID),
+			zap.Error(err),
+		)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load client profile"})
 		return
 	}
 
 	profile := defaultRuntimeClientProfile()
-	if len(configs) > 0 {
-		profile = clientConfigToRuntimeProfile(configs[0])
+	if config != nil {
+		profile = clientConfigToRuntimeProfile(*config)
 	}
 
 	c.JSON(http.StatusOK, profile)

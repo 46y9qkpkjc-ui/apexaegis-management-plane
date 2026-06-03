@@ -112,6 +112,35 @@ variable "device_trust_store_arn" {
   type        = string
 }
 
+variable "device_certificate_authority_arn" {
+  description = "AWS Private CA ARN used to sign client-generated device CSRs."
+  type        = string
+}
+
+variable "device_certificate_template_arn" {
+  description = "AWS Private CA client-auth certificate template ARN."
+  type        = string
+  default     = "arn:aws:acm-pca:::template/EndEntityClientAuthCertificate/V1"
+}
+
+variable "device_certificate_signing_algorithm" {
+  description = "Signing algorithm matching the AWS Private CA key family."
+  type        = string
+  default     = "SHA256WITHECDSA"
+}
+
+variable "user_portal_login_url" {
+  description = "User portal URL that receives the OIDC authorization callback parameters."
+  type        = string
+  default     = "https://users.apexaegis.app"
+}
+
+variable "user_portal_artifacts_json" {
+  description = "JSON catalog of approved signed client artifacts. Use short-lived signed download URLs."
+  type        = string
+  default     = "[]"
+}
+
 # ── Data sources ───────────────────────────────────────────────────────────
 
 data "aws_vpc" "default" {
@@ -469,6 +498,36 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role" "ecs_task" {
+  name = "apexaegis-mgmt-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "device_certificate_issuance" {
+  name = "apexaegis-device-certificate-issuance"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "acm-pca:IssueCertificate",
+        "acm-pca:GetCertificate"
+      ]
+      Resource = var.device_certificate_authority_arn
+    }]
+  })
+}
+
 # CloudWatch Logs for container output
 resource "aws_cloudwatch_log_group" "mgmt" {
   name              = "/ecs/apexaegis-mgmt-plane"
@@ -486,6 +545,7 @@ resource "aws_ecs_task_definition" "mgmt" {
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([{
     name      = "management-plane"
@@ -512,6 +572,12 @@ resource "aws_ecs_task_definition" "mgmt" {
       # by the gateway-only gRPC listener. ALB verifies mTLS and forwards cert
       # metadata; the gRPC server rejects mismatched gateway_id claims.
       { name = "GRPC_REQUIRE_CLIENT_IDENTITY", value = "true" },
+      { name = "WEB_UI_ALLOWED_ORIGINS", value = "https://www.apexaegis.app,https://apexaegis.app,${var.user_portal_login_url}" },
+      { name = "USER_PORTAL_LOGIN_URL", value = var.user_portal_login_url },
+      { name = "USER_PORTAL_ARTIFACTS_JSON", value = var.user_portal_artifacts_json },
+      { name = "DEVICE_CERTIFICATE_AUTHORITY_ARN", value = var.device_certificate_authority_arn },
+      { name = "DEVICE_CERTIFICATE_TEMPLATE_ARN", value = var.device_certificate_template_arn },
+      { name = "DEVICE_CERTIFICATE_SIGNING_ALGORITHM", value = var.device_certificate_signing_algorithm },
     ]
 
     secrets = [

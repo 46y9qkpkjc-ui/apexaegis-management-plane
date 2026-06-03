@@ -13,18 +13,19 @@ import (
 
 // ClientConfigRequest is the request payload for creating/updating configurations
 type ClientConfigRequest struct {
-	GroupID                 string          `json:"group_id" binding:"required"`
-	GroupName               string          `json:"group_name" binding:"required"`
-	TunnelSettings          json.RawMessage `json:"tunnel_settings" binding:"required"`
-	FeaturesSettings        json.RawMessage `json:"features_settings" binding:"required"`
-	PrivateAccessSettings   json.RawMessage `json:"private_access_settings" binding:"required"`
-	InstallSettings         json.RawMessage `json:"install_settings" binding:"required"`
-	TamperproofSettings     json.RawMessage `json:"tamperproof_settings" binding:"required"`
-	SessionTimeoutMins      int             `json:"session_timeout_mins"`
-	PeriodicAuthMins        int             `json:"periodic_auth_mins"`
-	DNSServers              []string        `json:"dns_servers"`
-	AllowedProtocols        []string        `json:"allowed_protocols"`
-	GatewayPriority         []string        `json:"gateway_priority"`
+	GroupID               string          `json:"group_id" binding:"required"`
+	GroupName             string          `json:"group_name" binding:"required"`
+	Priority              int             `json:"priority"`
+	TunnelSettings        json.RawMessage `json:"tunnel_settings" binding:"required"`
+	FeaturesSettings      json.RawMessage `json:"features_settings" binding:"required"`
+	PrivateAccessSettings json.RawMessage `json:"private_access_settings" binding:"required"`
+	InstallSettings       json.RawMessage `json:"install_settings" binding:"required"`
+	TamperproofSettings   json.RawMessage `json:"tamperproof_settings" binding:"required"`
+	SessionTimeoutMins    int             `json:"session_timeout_mins"`
+	PeriodicAuthMins      int             `json:"periodic_auth_mins"`
+	DNSServers            []string        `json:"dns_servers"`
+	AllowedProtocols      []string        `json:"allowed_protocols"`
+	GatewayPriority       []string        `json:"gateway_priority"`
 }
 
 // ClientConfigHandler handles client configuration CRUD operations
@@ -91,20 +92,21 @@ func (h *ClientConfigHandler) CreateClientConfig(c *gin.Context) {
 	}
 
 	config, err := h.store.Create(c.Request.Context(), orgID.(string), &db.ClientConfigRecord{
-		GroupID:                req.GroupID,
-		GroupName:              req.GroupName,
-		TunnelSettings:         req.TunnelSettings,
-		FeaturesSettings:       req.FeaturesSettings,
-		PrivateAccessSettings:  req.PrivateAccessSettings,
-		InstallSettings:        req.InstallSettings,
-		TamperproofSettings:    req.TamperproofSettings,
-		SessionTimeoutMins:     req.SessionTimeoutMins,
-		PeriodicAuthMins:       req.PeriodicAuthMins,
-		DNSServers:             req.DNSServers,
-		AllowedProtocols:       req.AllowedProtocols,
-		GatewayPriority:        req.GatewayPriority,
-		CreatedBy:              user,
-		UpdatedBy:              user,
+		GroupID:               req.GroupID,
+		GroupName:             req.GroupName,
+		Priority:              req.Priority,
+		TunnelSettings:        req.TunnelSettings,
+		FeaturesSettings:      req.FeaturesSettings,
+		PrivateAccessSettings: req.PrivateAccessSettings,
+		InstallSettings:       req.InstallSettings,
+		TamperproofSettings:   req.TamperproofSettings,
+		SessionTimeoutMins:    req.SessionTimeoutMins,
+		PeriodicAuthMins:      req.PeriodicAuthMins,
+		DNSServers:            req.DNSServers,
+		AllowedProtocols:      req.AllowedProtocols,
+		GatewayPriority:       req.GatewayPriority,
+		CreatedBy:             user,
+		UpdatedBy:             user,
 	})
 
 	if err != nil {
@@ -144,19 +146,20 @@ func (h *ClientConfigHandler) UpdateClientConfig(c *gin.Context) {
 	}
 
 	config, err := h.store.Update(c.Request.Context(), orgID.(string), groupID, &db.ClientConfigRecord{
-		GroupID:                req.GroupID,
-		GroupName:              req.GroupName,
-		TunnelSettings:         req.TunnelSettings,
-		FeaturesSettings:       req.FeaturesSettings,
-		PrivateAccessSettings:  req.PrivateAccessSettings,
-		InstallSettings:        req.InstallSettings,
-		TamperproofSettings:    req.TamperproofSettings,
-		SessionTimeoutMins:     req.SessionTimeoutMins,
-		PeriodicAuthMins:       req.PeriodicAuthMins,
-		DNSServers:             req.DNSServers,
-		AllowedProtocols:       req.AllowedProtocols,
-		GatewayPriority:        req.GatewayPriority,
-		UpdatedBy:              user,
+		GroupID:               req.GroupID,
+		GroupName:             req.GroupName,
+		Priority:              req.Priority,
+		TunnelSettings:        req.TunnelSettings,
+		FeaturesSettings:      req.FeaturesSettings,
+		PrivateAccessSettings: req.PrivateAccessSettings,
+		InstallSettings:       req.InstallSettings,
+		TamperproofSettings:   req.TamperproofSettings,
+		SessionTimeoutMins:    req.SessionTimeoutMins,
+		PeriodicAuthMins:      req.PeriodicAuthMins,
+		DNSServers:            req.DNSServers,
+		AllowedProtocols:      req.AllowedProtocols,
+		GatewayPriority:       req.GatewayPriority,
+		UpdatedBy:             user,
 	})
 
 	if err != nil {
