@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -35,7 +37,7 @@ func NewSCIMHandler(store *db.SCIMStore, logger *zap.Logger) *SCIMHandler {
 func (h *SCIMHandler) ServiceProviderConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"schemas":        []string{"urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"},
-		"patch":          gin.H{"supported": false},
+		"patch":          gin.H{"supported": true},
 		"bulk":           gin.H{"supported": false, "maxOperations": 0, "maxPayloadSize": 0},
 		"filter":         gin.H{"supported": true, "maxResults": 200},
 		"changePassword": gin.H{"supported": false},
@@ -179,6 +181,11 @@ func (h *SCIMHandler) UpdateAdminUser(c *gin.Context) {
 	c.JSON(http.StatusOK, adminUserToSCIM(updated, c.Request))
 }
 
+// PatchAdminUser handles PATCH /scim/v2/AdminUsers/:id.
+func (h *SCIMHandler) PatchAdminUser(c *gin.Context) {
+	h.patchUser(c, true)
+}
+
 // DeleteAdminUser handles DELETE /scim/v2/AdminUsers/:id
 func (h *SCIMHandler) DeleteAdminUser(c *gin.Context) {
 	if err := h.store.DeleteAdminUser(c.Request.Context(), c.Param("id")); err != nil {
@@ -273,6 +280,11 @@ func (h *SCIMHandler) UpdateClientUser(c *gin.Context) {
 	c.JSON(http.StatusOK, clientUserToSCIM(updated, c.Request))
 }
 
+// PatchClientUser handles PATCH /scim/v2/Users/:id.
+func (h *SCIMHandler) PatchClientUser(c *gin.Context) {
+	h.patchUser(c, false)
+}
+
 // DeleteClientUser handles DELETE /scim/v2/Users/:id
 func (h *SCIMHandler) DeleteClientUser(c *gin.Context) {
 	if err := h.store.DeleteClientUser(c.Request.Context(), c.Param("id")); err != nil {
@@ -320,6 +332,11 @@ func (h *SCIMHandler) CreateGroup(c *gin.Context) {
 		ExternalID:  req.ExternalID,
 		Source:      "scim",
 	}
+	adminIDs, clientIDs, err := h.store.ClassifyGroupMemberIDs(c.Request.Context(), orgID, memberValues(req.Members))
+	if err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	created, err := h.store.CreateGroup(c.Request.Context(), g)
 	if err != nil {
@@ -329,8 +346,10 @@ func (h *SCIMHandler) CreateGroup(c *gin.Context) {
 
 	// Set initial members if provided
 	if len(req.Members) > 0 {
-		adminIDs, clientIDs := classifyMemberIDs(req.Members)
-		_ = h.store.SetGroupMembers(c.Request.Context(), created.ID, adminIDs, clientIDs)
+		if err := h.store.SetGroupMembers(c.Request.Context(), created.ID, adminIDs, clientIDs); err != nil {
+			h.scimError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		created.Members = memberValues(req.Members)
 	}
 
@@ -359,6 +378,16 @@ func (h *SCIMHandler) UpdateGroup(c *gin.Context) {
 		DisplayName: req.DisplayName,
 		ExternalID:  req.ExternalID,
 	}
+	existing, err := h.store.GetGroup(c.Request.Context(), c.Param("id"))
+	if err != nil || existing == nil {
+		h.scimError(c, http.StatusNotFound, "Group not found")
+		return
+	}
+	adminIDs, clientIDs, err := h.store.ClassifyGroupMemberIDs(c.Request.Context(), existing.OrgID, memberValues(req.Members))
+	if err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	updated, err := h.store.UpdateGroup(c.Request.Context(), c.Param("id"), g)
 	if err != nil {
@@ -368,11 +397,112 @@ func (h *SCIMHandler) UpdateGroup(c *gin.Context) {
 
 	// Replace members if provided
 	if req.Members != nil {
-		adminIDs, clientIDs := classifyMemberIDs(req.Members)
-		_ = h.store.SetGroupMembers(c.Request.Context(), updated.ID, adminIDs, clientIDs)
+		if err := h.store.SetGroupMembers(c.Request.Context(), updated.ID, adminIDs, clientIDs); err != nil {
+			h.scimError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		updated.Members = memberValues(req.Members)
 	}
 
+	c.JSON(http.StatusOK, groupToSCIM(updated, c.Request))
+}
+
+// PatchGroup handles PATCH /scim/v2/Groups/:id for Okta Group Push.
+func (h *SCIMHandler) PatchGroup(c *gin.Context) {
+	var req scimPatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.scimError(c, http.StatusBadRequest, "invalid SCIM PatchOp request body")
+		return
+	}
+
+	group, err := h.store.GetGroup(c.Request.Context(), c.Param("id"))
+	if err != nil || group == nil {
+		h.scimError(c, http.StatusNotFound, "Group not found")
+		return
+	}
+
+	members := append([]string(nil), group.Members...)
+	for _, operation := range req.Operations {
+		op := strings.ToLower(strings.TrimSpace(operation.Op))
+		path := strings.TrimSpace(operation.Path)
+		switch {
+		case strings.EqualFold(path, "displayName"):
+			value, valueErr := patchString(operation.Value)
+			if valueErr != nil || value == "" {
+				h.scimError(c, http.StatusBadRequest, "displayName patch value must be a non-empty string")
+				return
+			}
+			group.DisplayName = value
+		case strings.EqualFold(path, "members"):
+			values, valueErr := patchMembers(operation.Value)
+			if valueErr != nil {
+				h.scimError(c, http.StatusBadRequest, valueErr.Error())
+				return
+			}
+			switch op {
+			case "add":
+				members = appendUnique(members, values...)
+			case "remove":
+				members = removeValues(members, values...)
+			case "replace":
+				members = append([]string(nil), values...)
+			default:
+				h.scimError(c, http.StatusBadRequest, "unsupported group members patch operation")
+				return
+			}
+		case memberPathValue(path) != "":
+			if op != "remove" {
+				h.scimError(c, http.StatusBadRequest, "filtered members patch only supports remove")
+				return
+			}
+			members = removeValues(members, memberPathValue(path))
+		case path == "":
+			var values map[string]json.RawMessage
+			if err := json.Unmarshal(operation.Value, &values); err != nil {
+				h.scimError(c, http.StatusBadRequest, "pathless group patch value must be an object")
+				return
+			}
+			if raw, ok := values["displayName"]; ok {
+				value, valueErr := patchString(raw)
+				if valueErr != nil || value == "" {
+					h.scimError(c, http.StatusBadRequest, "displayName patch value must be a non-empty string")
+					return
+				}
+				group.DisplayName = value
+			}
+			if raw, ok := values["members"]; ok {
+				values, valueErr := patchMembers(raw)
+				if valueErr != nil {
+					h.scimError(c, http.StatusBadRequest, valueErr.Error())
+					return
+				}
+				if op == "add" {
+					members = appendUnique(members, values...)
+				} else {
+					members = append([]string(nil), values...)
+				}
+			}
+		default:
+			h.scimError(c, http.StatusBadRequest, "unsupported group patch path")
+			return
+		}
+	}
+
+	adminIDs, clientIDs, err := h.store.ClassifyGroupMemberIDs(c.Request.Context(), group.OrgID, members)
+	if err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated, err := h.store.UpdateGroup(c.Request.Context(), group.ID, group)
+	if err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.store.SetGroupMembers(c.Request.Context(), group.ID, adminIDs, clientIDs); err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated.Members = members
 	c.JSON(http.StatusOK, groupToSCIM(updated, c.Request))
 }
 
@@ -423,7 +553,155 @@ type scimGroupMember struct {
 	Type    string `json:"$type,omitempty"` // "AdminUser" or "User"
 }
 
+type scimPatchRequest struct {
+	Schemas    []string             `json:"schemas"`
+	Operations []scimPatchOperation `json:"Operations"`
+}
+
+type scimPatchOperation struct {
+	Op    string          `json:"op"`
+	Path  string          `json:"path,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
+}
+
 // ─── SCIM JSON serialization helpers ────────────────────────────────
+
+func (h *SCIMHandler) patchUser(c *gin.Context, admin bool) {
+	var req scimPatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.scimError(c, http.StatusBadRequest, "invalid SCIM PatchOp request body")
+		return
+	}
+
+	var user *db.SCIMUser
+	var err error
+	if admin {
+		user, err = h.store.GetAdminUser(c.Request.Context(), c.Param("id"))
+	} else {
+		user, err = h.store.GetClientUser(c.Request.Context(), c.Param("id"))
+	}
+	if err != nil || user == nil {
+		h.scimError(c, http.StatusNotFound, "User not found")
+		return
+	}
+
+	for _, operation := range req.Operations {
+		if err := applyUserPatch(user, operation); err != nil {
+			h.scimError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	if admin {
+		user, err = h.store.UpdateAdminUser(c.Request.Context(), user.ID, user)
+	} else {
+		user, err = h.store.UpdateClientUser(c.Request.Context(), user.ID, user)
+	}
+	if err != nil {
+		h.scimError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if admin {
+		c.JSON(http.StatusOK, adminUserToSCIM(user, c.Request))
+		return
+	}
+	c.JSON(http.StatusOK, clientUserToSCIM(user, c.Request))
+}
+
+func applyUserPatch(user *db.SCIMUser, operation scimPatchOperation) error {
+	op := strings.ToLower(strings.TrimSpace(operation.Op))
+	if op != "add" && op != "replace" && op != "remove" {
+		return fmt.Errorf("unsupported user patch operation")
+	}
+
+	path := strings.ToLower(strings.TrimSpace(operation.Path))
+	if path == "" {
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(operation.Value, &values); err != nil {
+			return fmt.Errorf("pathless user patch value must be an object")
+		}
+		for key, raw := range values {
+			if err := applyUserPatch(user, scimPatchOperation{Op: op, Path: key, Value: raw}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if op == "remove" {
+		switch path {
+		case "department":
+			user.Department = ""
+		case "title":
+			user.Title = ""
+		case "externalid":
+			user.SCIMExternalID = ""
+		default:
+			return fmt.Errorf("unsupported user remove patch path")
+		}
+		return nil
+	}
+
+	switch path {
+	case "active":
+		var active bool
+		if err := json.Unmarshal(operation.Value, &active); err != nil {
+			return fmt.Errorf("active patch value must be a boolean")
+		}
+		user.Status = scimActiveToStatus(&active)
+	case "username":
+		value, err := patchString(operation.Value)
+		if err != nil || value == "" {
+			return fmt.Errorf("userName patch value must be a non-empty string")
+		}
+		user.Email = value
+	case "displayname", "name.formatted":
+		value, err := patchString(operation.Value)
+		if err != nil || value == "" {
+			return fmt.Errorf("name patch value must be a non-empty string")
+		}
+		user.Name = value
+	case "name":
+		var name scimName
+		if err := json.Unmarshal(operation.Value, &name); err != nil {
+			return fmt.Errorf("name patch value must be an object")
+		}
+		user.Name = scimDisplayName(scimUserRequest{Name: name, UserName: user.Email})
+	case "emails":
+		var emails []scimAttr
+		if err := json.Unmarshal(operation.Value, &emails); err != nil {
+			return fmt.Errorf("emails patch value must be an array")
+		}
+		user.Email = scimEmail(scimUserRequest{Emails: emails, UserName: user.Email})
+	case `emails[type eq "work"].value`, `emails[type eq "work"]`:
+		value, err := patchString(operation.Value)
+		if err != nil || value == "" {
+			return fmt.Errorf("work email patch value must be a non-empty string")
+		}
+		user.Email = value
+	case "department":
+		value, err := patchString(operation.Value)
+		if err != nil {
+			return fmt.Errorf("department patch value must be a string")
+		}
+		user.Department = value
+	case "title":
+		value, err := patchString(operation.Value)
+		if err != nil {
+			return fmt.Errorf("title patch value must be a string")
+		}
+		user.Title = value
+	case "externalid":
+		value, err := patchString(operation.Value)
+		if err != nil {
+			return fmt.Errorf("externalId patch value must be a string")
+		}
+		user.SCIMExternalID = value
+	default:
+		return fmt.Errorf("unsupported user patch path")
+	}
+	return nil
+}
 
 func adminUserToSCIM(u *db.SCIMUser, r *http.Request) gin.H {
 	loc := scimLocation(r, "AdminUsers", u.ID)
@@ -591,10 +869,73 @@ func memberValues(members []scimGroupMember) []string {
 	return ids
 }
 
+var memberFilterPattern = regexp.MustCompile(`(?i)^members\[value\s+eq\s+"([^"]+)"\]$`)
+
+func memberPathValue(path string) string {
+	matches := memberFilterPattern.FindStringSubmatch(strings.TrimSpace(path))
+	if len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+func patchString(raw json.RawMessage) (string, error) {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func patchMembers(raw json.RawMessage) ([]string, error) {
+	var members []scimGroupMember
+	if err := json.Unmarshal(raw, &members); err != nil {
+		var member scimGroupMember
+		if singleErr := json.Unmarshal(raw, &member); singleErr != nil {
+			return nil, fmt.Errorf("members patch value must be an array or member object")
+		}
+		members = []scimGroupMember{member}
+	}
+	values := memberValues(members)
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("member value must be a non-empty user ID")
+		}
+	}
+	return values, nil
+}
+
+func appendUnique(existing []string, values ...string) []string {
+	seen := make(map[string]bool, len(existing)+len(values))
+	result := make([]string, 0, len(existing)+len(values))
+	for _, value := range append(existing, values...) {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func removeValues(existing []string, values ...string) []string {
+	remove := make(map[string]bool, len(values))
+	for _, value := range values {
+		remove[value] = true
+	}
+	result := make([]string, 0, len(existing))
+	for _, value := range existing {
+		if !remove[value] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func (h *SCIMHandler) scimError(c *gin.Context, status int, detail string) {
+	c.Header("Content-Type", "application/scim+json")
 	c.JSON(status, gin.H{
 		"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
 		"detail":  detail,
-		"status":  status,
+		"status":  strconv.Itoa(status),
 	})
 }

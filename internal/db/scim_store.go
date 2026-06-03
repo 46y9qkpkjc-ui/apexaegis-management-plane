@@ -545,7 +545,10 @@ func (s *SCIMStore) GetGroupBySCIMID(ctx context.Context, externalID string) (*S
 	if err != nil {
 		return nil, fmt.Errorf("scim get group by ext: %w", err)
 	}
-	g.Members, _ = s.getGroupMembers(ctx, g.ID)
+	g.Members, err = s.getGroupMembers(ctx, g.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &g, nil
 }
 
@@ -568,7 +571,10 @@ func (s *SCIMStore) UpdateGroup(ctx context.Context, id string, g *SCIMGroup) (*
 	if err != nil {
 		return nil, fmt.Errorf("scim update group: %w", err)
 	}
-	updated.Members, _ = s.getGroupMembers(ctx, updated.ID)
+	updated.Members, err = s.getGroupMembers(ctx, updated.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &updated, nil
 }
 
@@ -628,10 +634,65 @@ func (s *SCIMStore) ListGroups(ctx context.Context, filter string, startIndex, c
 			&g.IdPID, &g.Source, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scim scan group: %w", err)
 		}
-		g.Members, _ = s.getGroupMembers(ctx, g.ID)
+		g.Members, err = s.getGroupMembers(ctx, g.ID)
+		if err != nil {
+			return nil, 0, err
+		}
 		groups = append(groups, g)
 	}
 	return groups, total, rows.Err()
+}
+
+// ClassifyGroupMemberIDs validates SCIM member IDs within a tenant.
+func (s *SCIMStore) ClassifyGroupMemberIDs(ctx context.Context, orgID string, memberIDs []string) (adminIDs, clientIDs []string, err error) {
+	adminIDs = make([]string, 0, len(memberIDs))
+	clientIDs = make([]string, 0, len(memberIDs))
+	seen := make(map[string]bool, len(memberIDs))
+	for _, id := range memberIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		var exists bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM system_mgmt.users WHERE id = $1 AND org_id = $2)`,
+			id, orgID,
+		).Scan(&exists); err != nil {
+			return nil, nil, fmt.Errorf("classify admin group member: %w", err)
+		}
+		if exists {
+			adminIDs = append(adminIDs, id)
+			continue
+		}
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM system_mgmt.client_users WHERE id = $1 AND org_id = $2)`,
+			id, orgID,
+		).Scan(&exists); err != nil {
+			return nil, nil, fmt.Errorf("classify client group member: %w", err)
+		}
+		if !exists {
+			return nil, nil, fmt.Errorf("group member %s was not found in this tenant", id)
+		}
+		clientIDs = append(clientIDs, id)
+	}
+	return adminIDs, clientIDs, nil
+}
+
+// SetGroupMemberIDs validates and classifies SCIM member IDs before replacing memberships.
+func (s *SCIMStore) SetGroupMemberIDs(ctx context.Context, groupID string, memberIDs []string) error {
+	group, err := s.GetGroup(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	if group == nil {
+		return errors.New("group not found")
+	}
+	adminIDs, clientIDs, err := s.ClassifyGroupMemberIDs(ctx, group.OrgID, memberIDs)
+	if err != nil {
+		return err
+	}
+	return s.SetGroupMembers(ctx, groupID, adminIDs, clientIDs)
 }
 
 // SetGroupMembers replaces all members of a group. memberIDs can be admin or client user IDs.

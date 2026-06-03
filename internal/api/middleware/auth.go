@@ -361,6 +361,14 @@ type scimTokenValidator interface {
 	ValidateSCIMToken(ctx context.Context, token string) (string, error)
 }
 
+// SCIMContentType marks all SCIM responses with the RFC 7644 media type.
+func SCIMContentType() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Content-Type", "application/scim+json")
+		c.Next()
+	}
+}
+
 // SCIMAuth validates bearer tokens sent by IdPs for SCIM provisioning.
 func SCIMAuth(validator scimTokenValidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -369,7 +377,7 @@ func SCIMAuth(validator scimTokenValidator) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, map[string]interface{}{
 				"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
 				"detail":  "Bearer token required",
-				"status":  401,
+				"status":  "401",
 			})
 			return
 		}
@@ -380,7 +388,7 @@ func SCIMAuth(validator scimTokenValidator) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, map[string]interface{}{
 				"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
 				"detail":  "Invalid SCIM bearer token",
-				"status":  401,
+				"status":  "401",
 			})
 			return
 		}

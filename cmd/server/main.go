@@ -305,6 +305,7 @@ func main() {
 
 	// SCIM 2.0 provisioning API (RFC 7644 — bearer token auth from IdPs)
 	scimAPI := router.Group("/scim/v2")
+	scimAPI.Use(middleware.SCIMContentType())
 	scimAPI.Use(middleware.SCIMAuth(scimStore))
 	{
 		scimHandler := handlers.NewSCIMHandler(scimStore, logger)
@@ -319,6 +320,7 @@ func main() {
 		scimAPI.POST("/AdminUsers", scimHandler.CreateAdminUser)
 		scimAPI.GET("/AdminUsers/:id", scimHandler.GetAdminUser)
 		scimAPI.PUT("/AdminUsers/:id", scimHandler.UpdateAdminUser)
+		scimAPI.PATCH("/AdminUsers/:id", scimHandler.PatchAdminUser)
 		scimAPI.DELETE("/AdminUsers/:id", scimHandler.DeleteAdminUser)
 
 		// Client endpoint users (SSE desktop/mobile users)
@@ -326,6 +328,7 @@ func main() {
 		scimAPI.POST("/Users", scimHandler.CreateClientUser)
 		scimAPI.GET("/Users/:id", scimHandler.GetClientUser)
 		scimAPI.PUT("/Users/:id", scimHandler.UpdateClientUser)
+		scimAPI.PATCH("/Users/:id", scimHandler.PatchClientUser)
 		scimAPI.DELETE("/Users/:id", scimHandler.DeleteClientUser)
 
 		// Groups
@@ -333,6 +336,7 @@ func main() {
 		scimAPI.POST("/Groups", scimHandler.CreateGroup)
 		scimAPI.GET("/Groups/:id", scimHandler.GetGroup)
 		scimAPI.PUT("/Groups/:id", scimHandler.UpdateGroup)
+		scimAPI.PATCH("/Groups/:id", scimHandler.PatchGroup)
 		scimAPI.DELETE("/Groups/:id", scimHandler.DeleteGroup)
 	}
 
