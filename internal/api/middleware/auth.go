@@ -202,7 +202,10 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 			c.Set("user_id", sub)
 		}
 		if orgID, ok := claims["org_id"].(string); ok {
-			c.Set("org_id", orgID)
+			c.Set("user_org_id", orgID)
+			if c.GetString("org_id") == "" {
+				c.Set("org_id", orgID)
+			}
 		}
 		if role, ok := claims["role"].(string); ok {
 			c.Set("role", role)
@@ -306,6 +309,7 @@ func DeviceMTLSAuth(validator deviceMTLSValidator) gin.HandlerFunc {
 		}
 
 		c.Set("org_id", tenantID)
+		c.Set("device_org_id", tenantID)
 		c.Set("device_id", deviceID)
 		c.Set("device_cert_subject", identity.subject)
 		c.Set("device_cert_serial", identity.serial)

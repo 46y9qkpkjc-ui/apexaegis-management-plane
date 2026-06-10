@@ -416,7 +416,8 @@ func main() {
 	deviceClientAPI := router.Group("/api/v1/client")
 	deviceClientAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	{
-		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, logger)
+		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, deviceStore, logger)
+		deviceClientAPI.POST("/bind-user", middleware.JWTAuth(authStore), middleware.RequireRole("client_user"), clientRuntimeHandler.BindUser)
 		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
 		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
 	}

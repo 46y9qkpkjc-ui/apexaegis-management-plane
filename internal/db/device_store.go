@@ -283,6 +283,37 @@ func nilIfEmptyString(value string) interface{} {
 	return value
 }
 
+// LinkClientUser binds an already-registered mTLS device row to the SCIM client
+// user that authenticated through desktop SSO. Runtime client configuration is
+// then resolved from that user's group membership.
+func (s *DeviceStore) LinkClientUser(ctx context.Context, orgID, deviceRowID, clientUserID string) error {
+	if orgID == "" || deviceRowID == "" || clientUserID == "" {
+		return errors.New("org_id, device_id, and client_user_id are required")
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE system_mgmt.devices d
+		   SET client_user_id = $3,
+		       updated_at = now(),
+		       last_seen = now()
+		 WHERE d.id = $2
+		   AND d.org_id = $1
+		   AND EXISTS (
+		     SELECT 1 FROM system_mgmt.client_users u
+		      WHERE u.id = $3
+		        AND u.org_id = $1
+		        AND u.status = 'active'
+		   )
+	`, orgID, deviceRowID, clientUserID)
+	if err != nil {
+		return fmt.Errorf("link client user to device: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("device or active client user not found for tenant")
+	}
+	return nil
+}
+
 // RefreshLicenseConsumption recomputes consumed licenses from active mTLS devices.
 func (s *DeviceStore) RefreshLicenseConsumption(ctx context.Context, orgID string) error {
 	_, err := s.db.ExecContext(ctx, `

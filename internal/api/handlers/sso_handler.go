@@ -91,6 +91,8 @@ func (h *SSOHandler) Authorize(c *gin.Context) {
 	redirectURI := webLoginURL(c)
 	if audience == "user_portal" {
 		redirectURI = portalLoginURL()
+	} else if audience == "desktop" {
+		redirectURI = desktopLoginURL(c)
 	}
 	callbackURI := callbackURL(c)
 
@@ -239,7 +241,7 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	if pending.Audience == "user_portal" {
+	if pending.Audience == "user_portal" || pending.Audience == "desktop" {
 		if h.scim == nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "user portal authentication is unavailable"})
 			return
@@ -265,8 +267,9 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "token issuance failed"})
 			return
 		}
-		h.logger.Info("User portal SSO login successful",
+		h.logger.Info("Client user SSO login successful",
 			zap.String("idp", idp.Name),
+			zap.String("audience", pending.Audience),
 			zap.String("email", user.Email),
 			zap.String("user_id", user.ID),
 		)
@@ -317,6 +320,17 @@ func portalLoginURL() string {
 		return configured
 	}
 	return "https://users.apexaegis.app"
+}
+
+func desktopLoginURL(c *gin.Context) string {
+	base := strings.TrimRight(c.Query("origin"), "/")
+	if base == "" {
+		base = strings.TrimRight(os.Getenv("DESKTOP_LOGIN_CALLBACK_URL"), "/")
+	}
+	if base == "" {
+		base = "apexaegis://auth"
+	}
+	return base
 }
 
 // ListSSOProviders returns IdPs available for SSO login (public endpoint).

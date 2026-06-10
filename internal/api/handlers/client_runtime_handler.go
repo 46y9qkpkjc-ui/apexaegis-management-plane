@@ -13,11 +13,12 @@ import (
 // ClientRuntimeHandler serves device-mTLS authenticated desktop/mobile clients.
 type ClientRuntimeHandler struct {
 	clientConfigStore *db.ClientConfigStore
+	deviceStore       *db.DeviceStore
 	logger            *zap.Logger
 }
 
-func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, logger *zap.Logger) *ClientRuntimeHandler {
-	return &ClientRuntimeHandler{clientConfigStore: clientConfigStore, logger: logger}
+func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, logger *zap.Logger) *ClientRuntimeHandler {
+	return &ClientRuntimeHandler{clientConfigStore: clientConfigStore, deviceStore: deviceStore, logger: logger}
 }
 
 type runtimeClientProfile struct {
@@ -27,6 +28,7 @@ type runtimeClientProfile struct {
 	DNSServers         []string              `json:"dns_servers"`
 	AllowedProtocols   []string              `json:"allowed_protocols"`
 	SessionTimeoutMins int                   `json:"session_timeout_mins"`
+	PeriodicAuthMins   int                   `json:"periodic_auth_mins"`
 	GatewayPreferences []string              `json:"gateway_preferences"`
 	LastSynced         string                `json:"last_synced,omitempty"`
 	Version            int                   `json:"version"`
@@ -54,6 +56,54 @@ type runtimeRoutePolicy struct {
 	Priority     int      `json:"priority"`
 	Resolver     string   `json:"resolver,omitempty"`
 	Comment      string   `json:"comment,omitempty"`
+}
+
+// BindUser links the mTLS-authenticated device to the currently authenticated
+// Okta/SCIM client user. This is intentionally dual-authenticated:
+// device certificate proves the machine, JWT proves the signed-in user.
+func (h *ClientRuntimeHandler) BindUser(c *gin.Context) {
+	orgID := c.GetString("device_org_id")
+	if orgID == "" {
+		orgID = c.GetString("org_id")
+	}
+	deviceID := c.GetString("device_id")
+	userID := c.GetString("user_id")
+	userOrgID := c.GetString("user_org_id")
+	if orgID == "" || deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device tenant context is required"})
+		return
+	}
+	if userID == "" || c.GetString("role") != "client_user" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "client user authentication is required"})
+		return
+	}
+	if userOrgID != "" && userOrgID != orgID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":          "device tenant and signed-in user tenant do not match",
+			"device_org_id":  orgID,
+			"user_org_id":    userOrgID,
+			"device_id":      deviceID,
+			"client_user_id": userID,
+		})
+		return
+	}
+	if h.deviceStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "device store is unavailable"})
+		return
+	}
+
+	if err := h.deviceStore.LinkClientUser(c.Request.Context(), orgID, deviceID, userID); err != nil {
+		h.logger.Warn("failed to bind client user to device",
+			zap.String("org_id", orgID),
+			zap.String("device_id", deviceID),
+			zap.String("user_id", userID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "bound", "device_id": deviceID, "user_id": userID})
 }
 
 // GetProfile returns the effective client configuration for an mTLS-authenticated device.
@@ -139,6 +189,7 @@ func defaultRuntimeClientProfile() runtimeClientProfile {
 		DNSServers:         []string{"100.64.0.1"},
 		AllowedProtocols:   []string{"QUIC", "TLS"},
 		SessionTimeoutMins: 480,
+		PeriodicAuthMins:   480,
 		GatewayPreferences: []string{},
 		Version:            1,
 	}
@@ -149,6 +200,10 @@ func clientConfigToRuntimeProfile(config db.ClientConfigRecord) runtimeClientPro
 	profile.GroupName = config.GroupName
 	profile.GroupID = config.GroupID
 	profile.SessionTimeoutMins = config.SessionTimeoutMins
+	profile.PeriodicAuthMins = config.PeriodicAuthMins
+	if profile.PeriodicAuthMins <= 0 {
+		profile.PeriodicAuthMins = profile.SessionTimeoutMins
+	}
 	profile.Version = config.Version
 	if len(config.DNSServers) > 0 {
 		profile.DNSServers = config.DNSServers
