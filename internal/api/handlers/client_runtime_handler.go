@@ -69,6 +69,14 @@ func (h *ClientRuntimeHandler) BindUser(c *gin.Context) {
 	deviceID := c.GetString("device_id")
 	userID := c.GetString("user_id")
 	userOrgID := c.GetString("user_org_id")
+	h.logger.Info("client bind-user request context",
+		zap.String("request_id", c.GetString("request_id")),
+		zap.String("device_org_id", orgID),
+		zap.String("device_id", deviceID),
+		zap.String("user_org_id", userOrgID),
+		zap.String("user_id", userID),
+		zap.String("role", c.GetString("role")),
+	)
 	if orgID == "" || deviceID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "device tenant context is required"})
 		return

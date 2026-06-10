@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -181,6 +182,7 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		if !strings.HasPrefix(auth, bearerPrefix) {
+			fmt.Printf("[AUTH] request_id=%s path=%s jwt=missing_bearer\n", c.GetString("request_id"), c.Request.URL.Path)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
@@ -188,12 +190,14 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 		token := strings.TrimPrefix(auth, bearerPrefix)
 
 		if v == nil {
+			fmt.Printf("[AUTH] request_id=%s path=%s jwt=validator_unavailable\n", c.GetString("request_id"), c.Request.URL.Path)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
 
 		claims, err := v.ValidateAccessToken(token)
 		if err != nil {
+			fmt.Printf("[AUTH] request_id=%s path=%s jwt=invalid err=%v\n", c.GetString("request_id"), c.Request.URL.Path, err)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
@@ -286,6 +290,13 @@ func DeviceMTLSAuth(validator deviceMTLSValidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		identity := deviceCertificateIdentity(c.Request)
 		if identity == nil {
+			fmt.Printf("[AUTH] request_id=%s path=%s mtls=missing_client_certificate tls=%t amzn_subject=%t amzn_leaf=%t\n",
+				c.GetString("request_id"),
+				c.Request.URL.Path,
+				c.Request.TLS != nil,
+				strings.TrimSpace(c.GetHeader("X-Amzn-Mtls-Clientcert-Subject")) != "",
+				strings.TrimSpace(c.GetHeader("X-Amzn-Mtls-Clientcert-Leaf")) != "" || strings.TrimSpace(c.GetHeader("X-Amzn-Mtls-Clientcert")) != "",
+			)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
@@ -295,18 +306,33 @@ func DeviceMTLSAuth(validator deviceMTLSValidator) gin.HandlerFunc {
 			tenantID = strings.TrimSpace(c.GetHeader("X-Tenant-ID"))
 		}
 		if tenantID == "" {
+			fmt.Printf("[AUTH] request_id=%s path=%s mtls=missing_tenant_header subject=%s serial=%s\n",
+				c.GetString("request_id"), c.Request.URL.Path, identity.subject, identity.serial)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
 		if validator == nil {
+			fmt.Printf("[AUTH] request_id=%s path=%s mtls=validator_unavailable tenant=%s\n",
+				c.GetString("request_id"), c.Request.URL.Path, tenantID)
 			AbortWithSafeError(c, http.StatusUnauthorized, nil)
 			return
 		}
 		deviceID, err := validator.ValidateMTLSDevice(c.Request.Context(), tenantID, identity.fingerprint, identity.serial)
 		if err != nil {
+			fmt.Printf("[AUTH] request_id=%s path=%s mtls=device_validation_failed tenant=%s subject=%s serial=%s fingerprint=%s err=%v\n",
+				c.GetString("request_id"),
+				c.Request.URL.Path,
+				tenantID,
+				identity.subject,
+				identity.serial,
+				identity.fingerprint,
+				err,
+			)
 			AbortWithSafeError(c, http.StatusUnauthorized, err)
 			return
 		}
+		fmt.Printf("[AUTH] request_id=%s path=%s mtls=ok tenant=%s device_id=%s subject=%s\n",
+			c.GetString("request_id"), c.Request.URL.Path, tenantID, deviceID, identity.subject)
 
 		c.Set("org_id", tenantID)
 		c.Set("device_org_id", tenantID)
