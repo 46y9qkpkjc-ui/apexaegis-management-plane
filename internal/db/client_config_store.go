@@ -200,7 +200,7 @@ func (s *ClientConfigStore) ListByOrgID(ctx context.Context, orgID string) ([]Cl
 	}
 	defer rows.Close()
 
-	var configs []ClientConfigRecord
+	configs := make([]ClientConfigRecord, 0)
 	for rows.Next() {
 		config := ClientConfigRecord{}
 		err := rows.Scan(
@@ -344,7 +344,7 @@ func (s *ClientConfigStore) GetAuditLogs(ctx context.Context, orgID, groupID str
 	}
 	defer rows.Close()
 
-	var logs []ClientConfigAuditLog
+	logs := make([]ClientConfigAuditLog, 0)
 	for rows.Next() {
 		log := ClientConfigAuditLog{}
 		err := rows.Scan(
