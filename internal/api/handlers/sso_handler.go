@@ -266,8 +266,14 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 				zap.String("org_id", user.OrgID),
 				zap.String("email", user.Email),
 				zap.String("status", user.Status),
+				zap.String("status_source", user.StatusSource),
+				zap.String("status_reason", user.StatusReason),
 			)
-			c.JSON(http.StatusForbidden, gin.H{"error": "account is suspended"})
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":         "account is suspended",
+				"status_source": user.StatusSource,
+				"status_reason": user.StatusReason,
+			})
 			return
 		}
 		result, err := h.auth.IssuePortalToken(user)

@@ -17,19 +17,23 @@ import (
 // SCIMUser represents a SCIM-provisioned user in either the administrators
 // (system_mgmt.users) or endpoint (system_mgmt.client_users) table.
 type SCIMUser struct {
-	ID             string     `json:"id"`
-	OrgID          string     `json:"org_id"`
-	Email          string     `json:"email"`
-	Name           string     `json:"name"`
-	Department     string     `json:"department,omitempty"`
-	Title          string     `json:"title,omitempty"`
-	Status         string     `json:"status"`
-	SCIMExternalID string     `json:"scim_external_id,omitempty"`
-	IdPID          string     `json:"idp_id,omitempty"`
-	OAuthProvider  string     `json:"oauth_provider,omitempty"`
-	OAuthSubject   string     `json:"oauth_subject,omitempty"`
-	CreatedAt      *time.Time `json:"created_at,omitempty"`
-	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
+	ID              string     `json:"id"`
+	OrgID           string     `json:"org_id"`
+	Email           string     `json:"email"`
+	Name            string     `json:"name"`
+	Department      string     `json:"department,omitempty"`
+	Title           string     `json:"title,omitempty"`
+	Status          string     `json:"status"`
+	StatusReason    string     `json:"status_reason,omitempty"`
+	StatusSource    string     `json:"status_source,omitempty"`
+	StatusUpdatedAt *time.Time `json:"status_updated_at,omitempty"`
+	StatusUpdatedBy string     `json:"status_updated_by,omitempty"`
+	SCIMExternalID  string     `json:"scim_external_id,omitempty"`
+	IdPID           string     `json:"idp_id,omitempty"`
+	OAuthProvider   string     `json:"oauth_provider,omitempty"`
+	OAuthSubject    string     `json:"oauth_subject,omitempty"`
+	CreatedAt       *time.Time `json:"created_at,omitempty"`
+	UpdatedAt       *time.Time `json:"updated_at,omitempty"`
 }
 
 // SCIMGroup represents a group synced via SCIM.
@@ -43,6 +47,19 @@ type SCIMGroup struct {
 	Members     []string   `json:"members,omitempty"` // user IDs
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+
+// ClientUserStatusEvent records why a client-user status changed.
+type ClientUserStatusEvent struct {
+	ID             string     `json:"id"`
+	OrgID          string     `json:"org_id"`
+	UserID         string     `json:"user_id"`
+	PreviousStatus string     `json:"previous_status,omitempty"`
+	NewStatus      string     `json:"new_status"`
+	Reason         string     `json:"reason,omitempty"`
+	Source         string     `json:"source"`
+	ActorID        string     `json:"actor_id,omitempty"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
 }
 
 // SCIMListResult is a paged list response for SCIM queries.
@@ -214,29 +231,37 @@ func (s *SCIMStore) ListAdminUsers(ctx context.Context, filter string, startInde
 // CreateClientUser provisions a new SSE endpoint user via SCIM.
 func (s *SCIMStore) CreateClientUser(ctx context.Context, u *SCIMUser) (*SCIMUser, error) {
 	var created SCIMUser
+	normalizeClientUserStatusFields(u)
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO system_mgmt.client_users
 			(org_id, email, name, department, title, oauth_provider, oauth_subject,
-			 scim_external_id, idp_id, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			 scim_external_id, idp_id, status, status_reason, status_source,
+			 status_updated_at, status_updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)
 		RETURNING id, org_id, email, name,
 		          COALESCE(department, ''), COALESCE(title, ''),
 		          COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		          COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		          status, created_at, updated_at
+		          status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		          status_updated_at, COALESCE(status_updated_by, ''),
+		          created_at, updated_at
 	`, u.OrgID, u.Email, u.Name, nilIfEmpty(u.Department), nilIfEmpty(u.Title),
 		nilIfEmpty(u.OAuthProvider), nilIfEmpty(u.OAuthSubject),
 		nilIfEmpty(u.SCIMExternalID), nilIfEmpty(u.IdPID), u.Status,
+		nilIfEmpty(u.StatusReason), nilIfEmpty(u.StatusSource), nilIfEmpty(u.StatusUpdatedBy),
 	).Scan(
 		&created.ID, &created.OrgID, &created.Email, &created.Name,
 		&created.Department, &created.Title,
 		&created.OAuthProvider, &created.OAuthSubject,
 		&created.SCIMExternalID, &created.IdPID,
-		&created.Status, &created.CreatedAt, &created.UpdatedAt,
+		&created.Status, &created.StatusReason, &created.StatusSource,
+		&created.StatusUpdatedAt, &created.StatusUpdatedBy,
+		&created.CreatedAt, &created.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scim create client user: %w", err)
 	}
+	_ = s.logClientUserStatusEvent(ctx, created.OrgID, created.ID, "", created.Status, created.StatusReason, created.StatusSource, created.StatusUpdatedBy)
 	s.logger.Info("SCIM client user created", zap.String("email", created.Email), zap.String("id", created.ID))
 	return &created, nil
 }
@@ -249,14 +274,18 @@ func (s *SCIMStore) GetClientUserBySCIMID(ctx context.Context, externalID string
 		       COALESCE(department, ''), COALESCE(title, ''),
 		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		       status, created_at, updated_at
+		       status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		       status_updated_at, COALESCE(status_updated_by, ''),
+		       created_at, updated_at
 		FROM system_mgmt.client_users WHERE scim_external_id = $1
 	`, externalID).Scan(
 		&u.ID, &u.OrgID, &u.Email, &u.Name,
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -275,14 +304,18 @@ func (s *SCIMStore) GetClientUser(ctx context.Context, id string) (*SCIMUser, er
 		       COALESCE(department, ''), COALESCE(title, ''),
 		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		       status, created_at, updated_at
+		       status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		       status_updated_at, COALESCE(status_updated_by, ''),
+		       created_at, updated_at
 		FROM system_mgmt.client_users WHERE id = $1
 	`, id).Scan(
 		&u.ID, &u.OrgID, &u.Email, &u.Name,
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -295,31 +328,49 @@ func (s *SCIMStore) GetClientUser(ctx context.Context, id string) (*SCIMUser, er
 
 // UpdateClientUser updates a client user's SCIM-managed fields.
 func (s *SCIMStore) UpdateClientUser(ctx context.Context, id string, u *SCIMUser) (*SCIMUser, error) {
+	existing, err := s.GetClientUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, errors.New("client user not found")
+	}
+	normalizeClientUserStatusFields(u)
 	var updated SCIMUser
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		UPDATE system_mgmt.client_users
 		SET name = $2, email = $3, department = $4, title = $5,
-		    status = $6, scim_external_id = $7, updated_at = now()
+		    status = $6, scim_external_id = $7, status_reason = $8,
+		    status_source = $9, status_updated_at = now(), status_updated_by = $10,
+		    updated_at = now()
 		WHERE id = $1
 		RETURNING id, org_id, email, name,
 		          COALESCE(department, ''), COALESCE(title, ''),
 		          COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		          COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		          status, created_at, updated_at
+		          status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		          status_updated_at, COALESCE(status_updated_by, ''),
+		          created_at, updated_at
 	`, id, u.Name, u.Email, nilIfEmpty(u.Department), nilIfEmpty(u.Title),
-		u.Status, nilIfEmpty(u.SCIMExternalID),
+		u.Status, nilIfEmpty(u.SCIMExternalID), nilIfEmpty(u.StatusReason),
+		nilIfEmpty(u.StatusSource), nilIfEmpty(u.StatusUpdatedBy),
 	).Scan(
 		&updated.ID, &updated.OrgID, &updated.Email, &updated.Name,
 		&updated.Department, &updated.Title,
 		&updated.OAuthProvider, &updated.OAuthSubject,
 		&updated.SCIMExternalID, &updated.IdPID,
-		&updated.Status, &updated.CreatedAt, &updated.UpdatedAt,
+		&updated.Status, &updated.StatusReason, &updated.StatusSource,
+		&updated.StatusUpdatedAt, &updated.StatusUpdatedBy,
+		&updated.CreatedAt, &updated.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("client user not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scim update client user: %w", err)
+	}
+	if existing.Status != updated.Status || existing.StatusReason != updated.StatusReason || existing.StatusSource != updated.StatusSource {
+		_ = s.logClientUserStatusEvent(ctx, updated.OrgID, updated.ID, existing.Status, updated.Status, updated.StatusReason, updated.StatusSource, updated.StatusUpdatedBy)
 	}
 	return &updated, nil
 }
@@ -361,7 +412,9 @@ func (s *SCIMStore) ListClientUsers(ctx context.Context, orgID, filter string, s
 	             COALESCE(department, ''), COALESCE(title, ''),
 	             COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 	             COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-	             status, created_at, updated_at
+	             status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+	             status_updated_at, COALESCE(status_updated_by, ''),
+	             created_at, updated_at
 	      FROM system_mgmt.client_users
 	      WHERE org_id = $1`
 	pageArgs := []interface{}{orgID}
@@ -384,7 +437,9 @@ func (s *SCIMStore) ListClientUsers(ctx context.Context, orgID, filter string, s
 			&u.Department, &u.Title,
 			&u.OAuthProvider, &u.OAuthSubject,
 			&u.SCIMExternalID, &u.IdPID,
-			&u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			&u.Status, &u.StatusReason, &u.StatusSource,
+			&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+			&u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scim scan client user: %w", err)
 		}
 		users = append(users, u)
@@ -402,7 +457,9 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 		       COALESCE(department, ''), COALESCE(title, ''),
 		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		       status, created_at, updated_at
+		       status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		       status_updated_at, COALESCE(status_updated_by, ''),
+		       created_at, updated_at
 		FROM system_mgmt.client_users
 		WHERE oauth_provider = $1 AND oauth_subject = $2
 	`, provider, subject).Scan(
@@ -410,7 +467,9 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err == nil {
 		_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.client_users SET last_login_at = now() WHERE id = $1`, u.ID)
@@ -423,7 +482,9 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 		       COALESCE(department, ''), COALESCE(title, ''),
 		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		       status, created_at, updated_at
+		       status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		       status_updated_at, COALESCE(status_updated_by, ''),
+		       created_at, updated_at
 		FROM system_mgmt.client_users
 		WHERE email = $1
 	`, email).Scan(
@@ -431,7 +492,9 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err == nil {
 		_, _ = s.db.ExecContext(ctx, `
@@ -461,13 +524,17 @@ func (s *SCIMStore) FindOrCreateClientUser(ctx context.Context, provider, subjec
 		          COALESCE(department, ''), COALESCE(title, ''),
 		          COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		          COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		          status, created_at, updated_at
+		          status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		          status_updated_at, COALESCE(status_updated_by, ''),
+		          created_at, updated_at
 	`, resolvedOrgID, email, name, provider, subject).Scan(
 		&u.ID, &u.OrgID, &u.Email, &u.Name,
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("auto-provision client user failed: %w", err)
@@ -491,7 +558,9 @@ func (s *SCIMStore) FindAndLinkProvisionedClientUser(ctx context.Context, provid
 		       COALESCE(department, ''), COALESCE(title, ''),
 		       COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 		       COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
-		       status, created_at, updated_at
+		       status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		       status_updated_at, COALESCE(status_updated_by, ''),
+		       created_at, updated_at
 		  FROM system_mgmt.client_users
 		 WHERE org_id = $1
 		   AND (
@@ -505,7 +574,9 @@ func (s *SCIMStore) FindAndLinkProvisionedClientUser(ctx context.Context, provid
 		&u.Department, &u.Title,
 		&u.OAuthProvider, &u.OAuthSubject,
 		&u.SCIMExternalID, &u.IdPID,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt,
+		&u.Status, &u.StatusReason, &u.StatusSource,
+		&u.StatusUpdatedAt, &u.StatusUpdatedBy,
+		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("user is not provisioned for the ApexAegis user portal")
@@ -891,7 +962,123 @@ func (s *SCIMStore) ValidateSCIMToken(ctx context.Context, token string) (orgID 
 	return orgID, nil
 }
 
+// ReactivateClientUser restores a suspended client user when the suspension was
+// not imposed by the IdP/SCIM policy source.
+func (s *SCIMStore) ReactivateClientUser(ctx context.Context, orgID, id, actorID, reason string) (*SCIMUser, error) {
+	existing, err := s.GetClientUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.OrgID != orgID {
+		return nil, errors.New("client user not found")
+	}
+	if existing.Status == "active" {
+		return existing, nil
+	}
+	if existing.StatusSource == "idp_policy" {
+		return nil, errors.New("cannot locally reactivate an IdP policy suspension; reactivate the user in Okta and resync SCIM")
+	}
+	if reason == "" {
+		reason = "Administrator reactivated user after verification"
+	}
+
+	var updated SCIMUser
+	err = s.db.QueryRowContext(ctx, `
+		UPDATE system_mgmt.client_users
+		   SET status = 'active',
+		       status_reason = $4,
+		       status_source = 'admin_override',
+		       status_updated_at = now(),
+		       status_updated_by = $3,
+		       updated_at = now()
+		 WHERE id = $1 AND org_id = $2
+		 RETURNING id, org_id, email, name,
+		          COALESCE(department, ''), COALESCE(title, ''),
+		          COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
+		          COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
+		          status, COALESCE(status_reason, ''), COALESCE(status_source, ''),
+		          status_updated_at, COALESCE(status_updated_by, ''),
+		          created_at, updated_at
+	`, id, orgID, nilIfEmpty(actorID), reason).Scan(
+		&updated.ID, &updated.OrgID, &updated.Email, &updated.Name,
+		&updated.Department, &updated.Title,
+		&updated.OAuthProvider, &updated.OAuthSubject,
+		&updated.SCIMExternalID, &updated.IdPID,
+		&updated.Status, &updated.StatusReason, &updated.StatusSource,
+		&updated.StatusUpdatedAt, &updated.StatusUpdatedBy,
+		&updated.CreatedAt, &updated.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("client user not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reactivate client user: %w", err)
+	}
+	_ = s.logClientUserStatusEvent(ctx, updated.OrgID, updated.ID, existing.Status, updated.Status, updated.StatusReason, updated.StatusSource, actorID)
+	return &updated, nil
+}
+
+// ListClientUserStatusEvents returns the recent status history for a client user.
+func (s *SCIMStore) ListClientUserStatusEvents(ctx context.Context, orgID, userID string, limit int) ([]ClientUserStatusEvent, error) {
+	if limit < 1 || limit > 100 {
+		limit = 25
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, org_id, user_id, COALESCE(previous_status, ''), new_status,
+		       COALESCE(reason, ''), source, COALESCE(actor_id, ''), created_at
+		  FROM system_mgmt.client_user_status_events
+		 WHERE org_id = $1 AND user_id = $2
+		 ORDER BY created_at DESC
+		 LIMIT $3
+	`, orgID, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list client user status events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]ClientUserStatusEvent, 0)
+	for rows.Next() {
+		var ev ClientUserStatusEvent
+		if err := rows.Scan(&ev.ID, &ev.OrgID, &ev.UserID, &ev.PreviousStatus, &ev.NewStatus, &ev.Reason, &ev.Source, &ev.ActorID, &ev.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan client user status event: %w", err)
+		}
+		events = append(events, ev)
+	}
+	return events, rows.Err()
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────
+
+func normalizeClientUserStatusFields(u *SCIMUser) {
+	if u.Status == "" {
+		u.Status = "active"
+	}
+	if u.StatusSource == "" {
+		u.StatusSource = "scim"
+	}
+	if u.StatusReason == "" {
+		if u.Status == "suspended" {
+			u.StatusReason = "SCIM active=false from identity provider"
+		} else {
+			u.StatusReason = "SCIM active=true from identity provider"
+		}
+	}
+	if u.StatusUpdatedBy == "" {
+		u.StatusUpdatedBy = "scim"
+	}
+}
+
+func (s *SCIMStore) logClientUserStatusEvent(ctx context.Context, orgID, userID, previousStatus, newStatus, reason, source, actorID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.client_user_status_events
+			(org_id, user_id, previous_status, new_status, reason, source, actor_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, orgID, userID, nilIfEmpty(previousStatus), newStatus, nilIfEmpty(reason), source, nilIfEmpty(actorID))
+	if err != nil {
+		return fmt.Errorf("log client user status event: %w", err)
+	}
+	return nil
+}
 
 func (s *SCIMStore) getGroupMembers(ctx context.Context, groupID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `

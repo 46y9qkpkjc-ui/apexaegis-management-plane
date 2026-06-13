@@ -312,6 +312,33 @@ func main() {
 			}
 			c.JSON(200, users)
 		})
+		clientAPI.GET("/:id/status-events", func(c *gin.Context) {
+			events, err := scimStore.ListClientUserStatusEvents(c.Request.Context(), c.GetString("org_id"), c.Param("id"), 25)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list client user status events"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"events": events})
+		})
+		clientAPI.POST("/:id/reactivate", func(c *gin.Context) {
+			var req struct {
+				Reason string `json:"reason"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+				return
+			}
+			user, err := scimStore.ReactivateClientUser(c.Request.Context(), c.GetString("org_id"), c.Param("id"), c.GetString("user_id"), strings.TrimSpace(req.Reason))
+			if err != nil {
+				status := http.StatusBadRequest
+				if strings.Contains(err.Error(), "IdP policy") || strings.Contains(err.Error(), "Okta") {
+					status = http.StatusConflict
+				}
+				c.JSON(status, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, user)
+		})
 	}
 
 	// Device Inventory API (admin-only — mTLS registered endpoint devices)

@@ -139,6 +139,7 @@ func (h *SCIMHandler) CreateAdminUser(c *gin.Context) {
 		Status:         scimActiveToStatus(req.Active),
 		SCIMExternalID: req.ExternalID,
 	}
+	setSCIMUserStatusMetadata(u, req.Active)
 
 	created, err := h.store.CreateAdminUser(c.Request.Context(), u)
 	if err != nil {
@@ -172,6 +173,7 @@ func (h *SCIMHandler) UpdateAdminUser(c *gin.Context) {
 		Status:         scimActiveToStatus(req.Active),
 		SCIMExternalID: req.ExternalID,
 	}
+	setSCIMUserStatusMetadata(u, req.Active)
 
 	updated, err := h.store.UpdateAdminUser(c.Request.Context(), c.Param("id"), u)
 	if err != nil {
@@ -236,6 +238,7 @@ func (h *SCIMHandler) CreateClientUser(c *gin.Context) {
 		Status:         scimActiveToStatus(req.Active),
 		SCIMExternalID: req.ExternalID,
 	}
+	setSCIMUserStatusMetadata(u, req.Active)
 
 	created, err := h.store.CreateClientUser(c.Request.Context(), u)
 	if err != nil {
@@ -271,6 +274,7 @@ func (h *SCIMHandler) UpdateClientUser(c *gin.Context) {
 		Status:         scimActiveToStatus(req.Active),
 		SCIMExternalID: req.ExternalID,
 	}
+	setSCIMUserStatusMetadata(u, req.Active)
 
 	updated, err := h.store.UpdateClientUser(c.Request.Context(), c.Param("id"), u)
 	if err != nil {
@@ -649,6 +653,14 @@ func applyUserPatch(user *db.SCIMUser, operation scimPatchOperation) error {
 			return fmt.Errorf("active patch value must be a boolean")
 		}
 		user.Status = scimActiveToStatus(&active)
+		user.StatusUpdatedBy = "scim"
+		if active {
+			user.StatusSource = "scim"
+			user.StatusReason = "SCIM active=true from identity provider"
+		} else {
+			user.StatusSource = "idp_policy"
+			user.StatusReason = "SCIM active=false from identity provider"
+		}
 	case "username":
 		value, err := patchString(operation.Value)
 		if err != nil || value == "" {
@@ -826,6 +838,17 @@ func scimActiveToStatus(active *bool) string {
 		return "active"
 	}
 	return "suspended"
+}
+
+func setSCIMUserStatusMetadata(user *db.SCIMUser, active *bool) {
+	user.StatusUpdatedBy = "scim"
+	if active == nil || *active {
+		user.StatusSource = "scim"
+		user.StatusReason = "SCIM active=true from identity provider"
+		return
+	}
+	user.StatusSource = "idp_policy"
+	user.StatusReason = "SCIM active=false from identity provider"
 }
 
 func parseSCIMListParams(c *gin.Context) (filter string, startIndex, count int) {
