@@ -259,6 +259,14 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 			return
 		}
 		if user.Status != "active" {
+			h.logger.Warn("Client user SSO rejected because account is not active",
+				zap.String("idp", idp.Name),
+				zap.String("audience", pending.Audience),
+				zap.String("user_id", user.ID),
+				zap.String("org_id", user.OrgID),
+				zap.String("email", user.Email),
+				zap.String("status", user.Status),
+			)
 			c.JSON(http.StatusForbidden, gin.H{"error": "account is suspended"})
 			return
 		}

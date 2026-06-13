@@ -338,7 +338,7 @@ func (s *SCIMStore) DeleteClientUser(ctx context.Context, id string) error {
 }
 
 // ListClientUsers returns a paged list of client endpoint users.
-func (s *SCIMStore) ListClientUsers(ctx context.Context, filter string, startIndex, count int) ([]SCIMUser, int, error) {
+func (s *SCIMStore) ListClientUsers(ctx context.Context, orgID, filter string, startIndex, count int) ([]SCIMUser, int, error) {
 	if startIndex < 1 {
 		startIndex = 1
 	}
@@ -346,10 +346,10 @@ func (s *SCIMStore) ListClientUsers(ctx context.Context, filter string, startInd
 		count = 100
 	}
 
-	countQ := `SELECT COUNT(*) FROM system_mgmt.client_users`
-	var args []interface{}
+	countQ := `SELECT COUNT(*) FROM system_mgmt.client_users WHERE org_id = $1`
+	args := []interface{}{orgID}
 	if filter != "" {
-		countQ += ` WHERE email ILIKE $1 OR name ILIKE $1`
+		countQ += ` AND (email ILIKE $2 OR name ILIKE $2)`
 		args = append(args, "%"+filter+"%")
 	}
 	var total int
@@ -362,10 +362,11 @@ func (s *SCIMStore) ListClientUsers(ctx context.Context, filter string, startInd
 	             COALESCE(oauth_provider, ''), COALESCE(oauth_subject, ''),
 	             COALESCE(scim_external_id, ''), COALESCE(idp_id, ''),
 	             status, created_at, updated_at
-	      FROM system_mgmt.client_users`
-	pageArgs := make([]interface{}, 0, 3)
+	      FROM system_mgmt.client_users
+	      WHERE org_id = $1`
+	pageArgs := []interface{}{orgID}
 	if filter != "" {
-		q += ` WHERE email ILIKE $1 OR name ILIKE $1`
+		q += ` AND (email ILIKE $2 OR name ILIKE $2)`
 		pageArgs = append(pageArgs, "%"+filter+"%")
 	}
 	q += fmt.Sprintf(` ORDER BY created_at DESC LIMIT %d OFFSET %d`, count, startIndex-1)

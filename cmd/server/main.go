@@ -302,7 +302,7 @@ func main() {
 	{
 		clientAPI.GET("", func(c *gin.Context) {
 			filter := c.Query("search")
-			users, _, err := scimStore.ListClientUsers(c.Request.Context(), filter, 1, 200)
+			users, _, err := scimStore.ListClientUsers(c.Request.Context(), c.GetString("org_id"), filter, 1, 200)
 			if err != nil {
 				c.JSON(500, gin.H{"error": "failed to list client users"})
 				return

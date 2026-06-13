@@ -200,7 +200,7 @@ func (h *SCIMHandler) DeleteAdminUser(c *gin.Context) {
 // ListClientUsers handles GET /scim/v2/Users
 func (h *SCIMHandler) ListClientUsers(c *gin.Context) {
 	filter, startIndex, count := parseSCIMListParams(c)
-	users, total, err := h.store.ListClientUsers(c.Request.Context(), filter, startIndex, count)
+	users, total, err := h.store.ListClientUsers(c.Request.Context(), c.GetString("scim_org_id"), filter, startIndex, count)
 	if err != nil {
 		h.scimError(c, http.StatusInternalServerError, err.Error())
 		return
