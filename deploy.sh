@@ -10,12 +10,19 @@ TAG="${1:-latest}"
 IMAGE="${ECR_REPO}:${TAG}"
 
 echo "==> Authenticating to ECR..."
+aws sts get-caller-identity --query "Account" --output text | grep -qx "${AWS_ACCOUNT_ID}" || {
+  echo "ERROR: current AWS credentials are not for account ${AWS_ACCOUNT_ID}" >&2
+  exit 1
+}
+docker logout "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >/dev/null 2>&1 || true
 aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 echo "==> Building multi-arch image: ${IMAGE}"
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --provenance=false \
+  --sbom=false \
   -t "${IMAGE}" \
   --push \
   .

@@ -19,6 +19,11 @@ echo ""
 
 # Step 1: ECR Login
 echo "🔐 Authenticating to ECR..."
+aws sts get-caller-identity --query "Account" --output text | grep -qx "$ACCOUNT_ID" || {
+  echo "ERROR: current AWS credentials are not for account $ACCOUNT_ID" >&2
+  exit 1
+}
+docker logout ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com >/dev/null 2>&1 || true
 aws ecr get-login-password --region $REGION | \
   docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
 echo "✅ Authenticated"
@@ -33,6 +38,8 @@ cd "$(dirname "$0")/.."
 # Build from management-plane root directory
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --provenance=false \
+  --sbom=false \
   -f Dockerfile \
   -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG} \
   -t ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest \
