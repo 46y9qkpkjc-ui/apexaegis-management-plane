@@ -348,6 +348,7 @@ func main() {
 	{
 		deviceHandler := handlers.NewDeviceHandler(deviceStore, logger)
 		deviceAPI.GET("", deviceHandler.ListDevices)
+		deviceAPI.GET("/:id", deviceHandler.GetDevice)
 	}
 
 	// Group Inventory API (admin-only — includes SCIM-pushed groups)
@@ -447,6 +448,8 @@ func main() {
 		deviceClientAPI.POST("/bind-user", middleware.JWTAuth(authStore), middleware.RequireRole("client_user"), clientRuntimeHandler.BindUser)
 		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
 		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
+		deviceClientAPI.POST("/posture", clientRuntimeHandler.ReportPosture)
+		deviceClientAPI.POST("/logs", clientRuntimeHandler.ReportLogs)
 	}
 
 	// Device-authenticated legacy agent policy endpoint.

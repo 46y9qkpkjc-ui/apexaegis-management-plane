@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"net/http"
 	"strconv"
 
@@ -37,4 +38,23 @@ func (h *DeviceHandler) ListDevices(c *gin.Context) {
 		devices = []db.DeviceInventoryItem{}
 	}
 	c.JSON(http.StatusOK, gin.H{"devices": devices})
+}
+
+func (h *DeviceHandler) GetDevice(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	detail, err := h.store.GetDeviceDetail(c.Request.Context(), orgID, c.Param("id"))
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "device not found"})
+		return
+	}
+	if err != nil {
+		h.logger.Error("failed to get device", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get device"})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
 }

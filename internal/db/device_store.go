@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -51,6 +52,33 @@ type DeviceInventoryItem struct {
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
 	CreatedAt           *time.Time `json:"created_at,omitempty"`
 	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
+}
+
+type DevicePostureReport struct {
+	CheckedAt        time.Time       `json:"checked_at"`
+	Compliant        bool            `json:"compliant"`
+	Score            int             `json:"score"`
+	DiskEncrypted    bool            `json:"disk_encrypted"`
+	FirewallEnabled  bool            `json:"firewall_enabled"`
+	AntivirusRunning bool            `json:"antivirus_running"`
+	AntivirusName    string          `json:"antivirus_name"`
+	OSVersion        string          `json:"os_version"`
+	Raw              json.RawMessage `json:"raw,omitempty"`
+}
+
+type DeviceClientLog struct {
+	LoggedAt time.Time       `json:"logged_at"`
+	Level    string          `json:"level"`
+	Source   string          `json:"source"`
+	Message  string          `json:"message"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Hash     string          `json:"-"`
+}
+
+type DeviceDetail struct {
+	Device  DeviceInventoryItem  `json:"device"`
+	Posture *DevicePostureReport `json:"posture,omitempty"`
+	Logs    []DeviceClientLog    `json:"logs"`
 }
 
 // DeploymentInfo contains organization deployment and device-license usage.
@@ -143,7 +171,7 @@ func (s *DeviceStore) ListDevices(ctx context.Context, orgID, search string, lim
 		args = append(args, "%"+strings.TrimSpace(search)+"%")
 		where += fmt.Sprintf(` AND (
 			d.device_id ILIKE $%d OR d.device_name ILIKE $%d OR
-			d.os_type ILIKE $%d OR u.email ILIKE $%d OR u.name ILIKE $%d
+			d.os_type ILIKE $%d OR COALESCE(cu.email, u.email, '') ILIKE $%d OR COALESCE(cu.name, u.name, '') ILIKE $%d
 		)`, len(args), len(args), len(args), len(args), len(args))
 	}
 
@@ -152,8 +180,8 @@ func (s *DeviceStore) ListDevices(ctx context.Context, orgID, search string, lim
 		       COALESCE(d.device_name, ''), COALESCE(d.device_type, ''),
 		       COALESCE(d.os_type, ''), COALESCE(d.os_version, ''),
 		       COALESCE(d.client_version, ''),
-		       COALESCE(d.user_id::STRING, ''), COALESCE(u.name, ''),
-		       COALESCE(u.email, ''), COALESCE(d.compliance_status, 'unknown'),
+		       COALESCE(d.client_user_id::STRING, d.user_id::STRING, ''), COALESCE(cu.name, u.name, ''),
+		       COALESCE(cu.email, u.email, ''), COALESCE(d.compliance_status, 'unknown'),
 		       COALESCE(d.status, 'unknown'), COALESCE(d.registered_via, ''),
 		       COALESCE(d.mtls_cert_subject, ''), COALESCE(d.mtls_cert_serial, ''),
 		       COALESCE(d.mtls_cert_fingerprint_sha256, ''),
@@ -161,6 +189,7 @@ func (s *DeviceStore) ListDevices(ctx context.Context, orgID, search string, lim
 		       d.last_seen, d.created_at, d.updated_at
 		  FROM system_mgmt.devices d
 		  LEFT JOIN system_mgmt.users u ON u.id = d.user_id
+		  LEFT JOIN system_mgmt.client_users cu ON cu.id = d.client_user_id
 		  %s
 		 ORDER BY d.last_seen DESC NULLS LAST, d.created_at DESC
 		 LIMIT $2
@@ -190,6 +219,109 @@ func (s *DeviceStore) ListDevices(ctx context.Context, orgID, search string, lim
 		return nil, fmt.Errorf("iterate devices: %w", err)
 	}
 	return devices, nil
+}
+
+func (s *DeviceStore) SavePostureReport(ctx context.Context, orgID, deviceID string, report DevicePostureReport) error {
+	if report.Score < 0 {
+		report.Score = 0
+	}
+	if report.Score > 100 {
+		report.Score = 100
+	}
+	if len(report.Raw) == 0 {
+		report.Raw = json.RawMessage(`{}`)
+	}
+	if report.CheckedAt.IsZero() {
+		report.CheckedAt = time.Now().UTC()
+	}
+	status := "non_compliant"
+	if report.Compliant {
+		status = "compliant"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.device_posture_reports
+		(org_id, device_id, checked_at, compliant, score, disk_encrypted, firewall_enabled,
+		 antivirus_running, antivirus_name, os_version, raw)
+		VALUES ($1, $2, $3,
+		 $4, $5, $6, $7, $8, $9, $10, $11)
+	`, orgID, deviceID, report.CheckedAt, report.Compliant, report.Score, report.DiskEncrypted,
+		report.FirewallEnabled, report.AntivirusRunning, report.AntivirusName, report.OSVersion, report.Raw)
+	if err != nil {
+		return fmt.Errorf("save posture report: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE system_mgmt.devices SET compliance_status=$3,
+		os_version=COALESCE(NULLIF($4,''), os_version), last_seen=now(), updated_at=now()
+		WHERE org_id=$1 AND id=$2`, orgID, deviceID, status, report.OSVersion)
+	return err
+}
+
+func (s *DeviceStore) SaveClientLogs(ctx context.Context, orgID, deviceID string, logs []DeviceClientLog) error {
+	for _, entry := range logs {
+		if strings.TrimSpace(entry.Message) == "" || entry.Hash == "" {
+			continue
+		}
+		if len(entry.Metadata) == 0 {
+			entry.Metadata = json.RawMessage(`{}`)
+		}
+		if entry.LoggedAt.IsZero() {
+			entry.LoggedAt = time.Now().UTC()
+		}
+		_, err := s.db.ExecContext(ctx, `INSERT INTO system_mgmt.device_client_logs
+			(org_id, device_id, logged_at, level, source, message, metadata, event_hash)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			ON CONFLICT (org_id, device_id, event_hash) DO NOTHING`, orgID, deviceID, entry.LoggedAt,
+			entry.Level, entry.Source, entry.Message, entry.Metadata, entry.Hash)
+		if err != nil {
+			return fmt.Errorf("save client log: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *DeviceStore) GetDeviceDetail(ctx context.Context, orgID, deviceID string) (*DeviceDetail, error) {
+	devices, err := s.ListDevices(ctx, orgID, "", 500)
+	if err != nil {
+		return nil, err
+	}
+	var detail DeviceDetail
+	found := false
+	for _, device := range devices {
+		if device.ID == deviceID {
+			detail.Device = device
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, sql.ErrNoRows
+	}
+	var posture DevicePostureReport
+	err = s.db.QueryRowContext(ctx, `SELECT checked_at, compliant, score, disk_encrypted, firewall_enabled,
+		antivirus_running, antivirus_name, os_version, raw FROM system_mgmt.device_posture_reports
+		WHERE org_id=$1 AND device_id=$2 ORDER BY checked_at DESC LIMIT 1`, orgID, deviceID).Scan(
+		&posture.CheckedAt, &posture.Compliant, &posture.Score, &posture.DiskEncrypted,
+		&posture.FirewallEnabled, &posture.AntivirusRunning, &posture.AntivirusName, &posture.OSVersion, &posture.Raw)
+	if err == nil {
+		detail.Posture = &posture
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
+	detail.Logs = []DeviceClientLog{}
+	rows, err := s.db.QueryContext(ctx, `SELECT logged_at, level, source, message, metadata
+		FROM system_mgmt.device_client_logs WHERE org_id=$1 AND device_id=$2
+		ORDER BY logged_at DESC LIMIT 200`, orgID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entry DeviceClientLog
+		if err := rows.Scan(&entry.LoggedAt, &entry.Level, &entry.Source, &entry.Message, &entry.Metadata); err != nil {
+			return nil, err
+		}
+		detail.Logs = append(detail.Logs, entry)
+	}
+	return &detail, rows.Err()
 }
 
 // RegisterMTLSDevice upserts a device from a verified client certificate.

@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zcp/management-plane/internal/db"
@@ -32,6 +36,20 @@ type runtimeClientProfile struct {
 	GatewayPreferences []string              `json:"gateway_preferences"`
 	LastSynced         string                `json:"last_synced,omitempty"`
 	Version            int                   `json:"version"`
+	PostureIntervalSec int                   `json:"posture_check_interval_seconds"`
+	DNSRouting         runtimeDNSRouting     `json:"dns_routing"`
+	FailClose          runtimeFailClose      `json:"fail_close_exceptions"`
+}
+
+type runtimeDNSRouting struct {
+	Enabled    bool     `json:"enabled"`
+	Resolver   string   `json:"resolver,omitempty"`
+	Exceptions []string `json:"exceptions"`
+}
+type runtimeFailClose struct {
+	Enabled      bool     `json:"enabled"`
+	ProcessNames []string `json:"process_names"`
+	FQDNs        []string `json:"fqdns"`
 }
 
 type runtimeClientFeatures struct {
@@ -39,7 +57,7 @@ type runtimeClientFeatures struct {
 	CollabOptimization bool `json:"collab_optimization"`
 	BiometricRequired  bool `json:"biometric_required"`
 	DevicePostureCheck bool `json:"device_posture_check"`
-	DNSFiltering       bool `json:"dns_filtering"`
+	DNSRouting         bool `json:"dns_routing"`
 	OtherVPNBypass     bool `json:"other_vpn_bypass"`
 	SSLInspection      bool `json:"ssl_inspection"`
 	DLPEnabled         bool `json:"dlp_enabled"`
@@ -186,6 +204,81 @@ func (h *ClientRuntimeHandler) GetRoutePolicies(c *gin.Context) {
 	})
 }
 
+type postureRequest struct {
+	CheckedAt        time.Time `json:"checked_at"`
+	Compliant        bool      `json:"compliant"`
+	Score            int       `json:"score"`
+	DiskEncrypted    bool      `json:"disk_encrypted"`
+	FirewallEnabled  bool      `json:"firewall_enabled"`
+	AntivirusRunning bool      `json:"antivirus_running"`
+	AntivirusName    string    `json:"antivirus_name"`
+	OSVersion        string    `json:"os_version"`
+}
+
+func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
+	orgID, deviceID := c.GetString("org_id"), c.GetString("device_id")
+	if orgID == "" || deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
+		return
+	}
+	var request postureRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid posture report"})
+		return
+	}
+	raw, _ := json.Marshal(request)
+	err := h.deviceStore.SavePostureReport(c.Request.Context(), orgID, deviceID, db.DevicePostureReport{
+		CheckedAt: request.CheckedAt, Compliant: request.Compliant, Score: request.Score,
+		DiskEncrypted: request.DiskEncrypted, FirewallEnabled: request.FirewallEnabled,
+		AntivirusRunning: request.AntivirusRunning, AntivirusName: request.AntivirusName,
+		OSVersion: request.OSVersion, Raw: raw,
+	})
+	if err != nil {
+		h.logger.Error("failed to save posture", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save posture"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+}
+
+type clientLogRequest struct {
+	Logs []struct {
+		LoggedAt time.Time       `json:"logged_at"`
+		Level    string          `json:"level"`
+		Source   string          `json:"source"`
+		Message  string          `json:"message"`
+		Metadata json.RawMessage `json:"metadata"`
+	} `json:"logs"`
+}
+
+func (h *ClientRuntimeHandler) ReportLogs(c *gin.Context) {
+	orgID, deviceID := c.GetString("org_id"), c.GetString("device_id")
+	if orgID == "" || deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
+		return
+	}
+	var request clientLogRequest
+	if err := c.ShouldBindJSON(&request); err != nil || len(request.Logs) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid client logs"})
+		return
+	}
+	logs := make([]db.DeviceClientLog, 0, len(request.Logs))
+	for _, entry := range request.Logs {
+		message := strings.TrimSpace(entry.Message)
+		if message == "" {
+			continue
+		}
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%s", entry.LoggedAt.UTC().Format(time.RFC3339Nano), entry.Level, entry.Source, message)))
+		logs = append(logs, db.DeviceClientLog{LoggedAt: entry.LoggedAt, Level: entry.Level, Source: entry.Source, Message: message, Metadata: entry.Metadata, Hash: fmt.Sprintf("%x", hash[:])})
+	}
+	if err := h.deviceStore.SaveClientLogs(c.Request.Context(), orgID, deviceID, logs); err != nil {
+		h.logger.Error("failed to save client logs", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save client logs"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "count": len(logs)})
+}
+
 func defaultRuntimeClientProfile() runtimeClientProfile {
 	return runtimeClientProfile{
 		GroupName: "Default",
@@ -200,6 +293,9 @@ func defaultRuntimeClientProfile() runtimeClientProfile {
 		PeriodicAuthMins:   480,
 		GatewayPreferences: []string{},
 		Version:            1,
+		PostureIntervalSec: 60,
+		DNSRouting:         runtimeDNSRouting{Enabled: true, Resolver: "100.64.0.1", Exceptions: []string{}},
+		FailClose:          runtimeFailClose{ProcessNames: []string{}, FQDNs: []string{}},
 	}
 }
 
@@ -227,12 +323,25 @@ func clientConfigToRuntimeProfile(config db.ClientConfigRecord) runtimeClientPro
 	profile.Features.SplitTunnelEnabled = boolSetting(settings, "split_tunnel_enabled", "splitTunnelEnabled")
 	profile.Features.CollabOptimization = boolSetting(settings, "collab_optimization", "collabOptimization")
 	profile.Features.BiometricRequired = boolSetting(settings, "biometric_required", "biometricRequired")
-	profile.Features.DevicePostureCheck = boolSetting(settings, "device_posture_check", "devicePostureCheck")
-	profile.Features.DNSFiltering = boolSetting(settings, "dns_filtering", "dnsFiltering")
+	tunnel := jsonMap(config.TunnelSettings)
+	profile.Features.DevicePostureCheck = boolSetting(tunnel, "device_posture_enabled")
+	dnsRouting := mapSetting(settings, "dns_routing")
+	profile.DNSRouting.Enabled = boolSetting(dnsRouting, "enabled")
+	profile.DNSRouting.Resolver = stringSetting(dnsRouting, "resolver")
+	profile.DNSRouting.Exceptions = stringSliceSetting(dnsRouting, "exceptions", "fqdns")
+	profile.Features.DNSRouting = profile.DNSRouting.Enabled
 	profile.Features.OtherVPNBypass = boolSetting(settings, "other_vpn_bypass", "otherVpnBypass")
 	profile.Features.SSLInspection = boolSetting(settings, "ssl_inspection", "sslInspection")
-	profile.Features.DLPEnabled = boolSetting(settings, "dlp_enabled", "dlpEnabled")
+	profile.Features.DLPEnabled = boolSetting(mapSetting(settings, "dlp"), "enabled")
 	profile.Features.LogForwarding = boolSetting(settings, "log_forwarding", "logForwarding")
+	if interval := intSetting(tunnel, "posture_check_interval_seconds"); interval >= 15 {
+		profile.PostureIntervalSec = interval
+	}
+	tamper := jsonMap(config.TamperproofSettings)
+	failClose := mapSetting(tamper, "fail_close_exceptions")
+	profile.FailClose.Enabled = boolSetting(failClose, "enabled")
+	profile.FailClose.ProcessNames = stringSliceSetting(failClose, "process_names", "processes")
+	profile.FailClose.FQDNs = stringSliceSetting(failClose, "fqdns", "domains")
 	return profile
 }
 
@@ -256,12 +365,27 @@ func boolSetting(values map[string]interface{}, keys ...string) bool {
 	return false
 }
 
+func mapSetting(values map[string]interface{}, key string) map[string]interface{} {
+	if value, ok := values[key].(map[string]interface{}); ok {
+		return value
+	}
+	return map[string]interface{}{}
+}
+
 func clientConfigToRoutePolicies(config db.ClientConfigRecord) []runtimeRoutePolicy {
 	settings := jsonMap(config.PrivateAccessSettings)
 	var policies []runtimeRoutePolicy
 	policies = append(policies, routePoliciesFromSetting(settings["route_policies"])...)
 	policies = append(policies, routePoliciesFromSetting(settings["traffic_bypass"])...)
 	policies = append(policies, dnsExceptionPolicies(settings["dns_exceptions"])...)
+	features := jsonMap(config.FeaturesSettings)
+	dnsRouting := mapSetting(features, "dns_routing")
+	if boolSetting(dnsRouting, "enabled") {
+		patterns := stringSliceSetting(dnsRouting, "exceptions", "fqdns")
+		if len(patterns) > 0 {
+			policies = append(policies, runtimeRoutePolicy{ID: "dns-routing-exceptions", Name: "DNS routing exceptions", PolicyAction: "bypass", MatchType: "dns_query", Patterns: patterns, Enabled: true, Resolver: stringSetting(dnsRouting, "resolver")})
+		}
+	}
 	for i := range policies {
 		if policies[i].Priority == 0 {
 			policies[i].Priority = (i + 1) * 10
