@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 )
 
@@ -58,6 +60,12 @@ type ClientConfigStore struct {
 // NewClientConfigStore creates a new client config store
 func NewClientConfigStore(db *DB, logger *zap.Logger) *ClientConfigStore {
 	return &ClientConfigStore{db: db, logger: logger}
+}
+
+// IsUniqueViolation reports whether an error came from a duplicate-key write.
+func IsUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // Create creates a new client configuration
@@ -235,7 +243,9 @@ func (s *ClientConfigStore) Update(ctx context.Context, orgID, groupID string, c
 	config.UpdatedAt = now
 	config.OrgID = orgID
 	config.GroupID = oldConfig.GroupID
-	config.GroupName = oldConfig.GroupName
+	if config.GroupName == "" {
+		config.GroupName = oldConfig.GroupName
+	}
 	config.ID = oldConfig.ID
 	config.CreatedBy = oldConfig.CreatedBy
 	config.CreatedAt = oldConfig.CreatedAt

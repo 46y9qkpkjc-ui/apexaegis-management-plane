@@ -92,7 +92,7 @@ func (h *ClientConfigHandler) CreateClientConfig(c *gin.Context) {
 		user = u.(string)
 	}
 
-	config, err := h.store.Create(c.Request.Context(), orgID.(string), &db.ClientConfigRecord{
+	record := &db.ClientConfigRecord{
 		GroupID:               req.GroupID,
 		GroupName:             req.GroupName,
 		Priority:              req.Priority,
@@ -109,9 +109,23 @@ func (h *ClientConfigHandler) CreateClientConfig(c *gin.Context) {
 		GatewayPriority:       req.GatewayPriority,
 		CreatedBy:             user,
 		UpdatedBy:             user,
-	})
+	}
+
+	config, err := h.store.Create(c.Request.Context(), orgID.(string), record)
 
 	if err != nil {
+		if db.IsUniqueViolation(err) {
+			h.logger.Warn("client config already exists during create; applying update instead",
+				zap.String("group_id", req.GroupID),
+				zap.String("org_id", orgID.(string)),
+			)
+			config, err = h.store.Update(c.Request.Context(), orgID.(string), req.GroupID, record)
+			if err == nil {
+				h.logger.Info("client config updated via create fallback", zap.String("group_id", req.GroupID), zap.String("org_id", orgID.(string)))
+				c.JSON(http.StatusOK, config)
+				return
+			}
+		}
 		h.logger.Error("failed to create config", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create configuration"})
 		return
