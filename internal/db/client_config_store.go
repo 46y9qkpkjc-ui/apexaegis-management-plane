@@ -18,6 +18,7 @@ type ClientConfigRecord struct {
 	Priority              int             `json:"priority"`
 	TunnelSettings        json.RawMessage `json:"tunnel_settings"`
 	FeaturesSettings      json.RawMessage `json:"features_settings"`
+	RoutingSettings       json.RawMessage `json:"routing_settings"`
 	PrivateAccessSettings json.RawMessage `json:"private_access_settings"`
 	InstallSettings       json.RawMessage `json:"install_settings"`
 	TamperproofSettings   json.RawMessage `json:"tamperproof_settings"`
@@ -67,20 +68,21 @@ func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *Cl
 	config.Version = 1
 	config.CreatedAt = now
 	config.UpdatedAt = now
+	config.RoutingSettings = normalizeJSONPayload(config.RoutingSettings)
 
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO system_mgmt.client_configurations (
 			org_id, group_id, group_name, priority,
-			tunnel_settings, features_settings, private_access_settings,
+			tunnel_settings, features_settings, routing_settings, private_access_settings,
 			install_settings, tamperproof_settings,
 			session_timeout_mins, periodic_auth_mins,
 			dns_servers, allowed_protocols, gateway_priority,
 			created_by, updated_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, created_at, updated_at, version
 	`,
 		orgID, config.GroupID, config.GroupName, config.Priority,
-		config.TunnelSettings, config.FeaturesSettings, config.PrivateAccessSettings,
+		config.TunnelSettings, config.FeaturesSettings, config.RoutingSettings, config.PrivateAccessSettings,
 		config.InstallSettings, config.TamperproofSettings,
 		config.SessionTimeoutMins, config.PeriodicAuthMins,
 		config.DNSServers, config.AllowedProtocols, config.GatewayPriority,
@@ -93,7 +95,7 @@ func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *Cl
 	}
 
 	// Log the creation
-	s.logAudit(ctx, orgID, config.ID, "create", config.CreatedBy, nil, config.TunnelSettings, "Client configuration created")
+	s.logAudit(ctx, orgID, config.ID, "create", config.CreatedBy, nil, clientConfigAuditPayload(config), "Client configuration created")
 
 	return config, nil
 }
@@ -102,7 +104,7 @@ func (s *ClientConfigStore) Create(ctx context.Context, orgID string, config *Cl
 func (s *ClientConfigStore) GetByGroupID(ctx context.Context, orgID, groupID string) (*ClientConfigRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, org_id, group_id, group_name, priority,
-		       tunnel_settings, features_settings, private_access_settings,
+		       tunnel_settings, features_settings, routing_settings, private_access_settings,
 		       install_settings, tamperproof_settings,
 		       session_timeout_mins, periodic_auth_mins,
 		       dns_servers, allowed_protocols, gateway_priority,
@@ -114,7 +116,7 @@ func (s *ClientConfigStore) GetByGroupID(ctx context.Context, orgID, groupID str
 	config := &ClientConfigRecord{}
 	err := row.Scan(
 		&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-		&config.TunnelSettings, &config.FeaturesSettings, &config.PrivateAccessSettings,
+		&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
 		&config.InstallSettings, &config.TamperproofSettings,
 		&config.SessionTimeoutMins, &config.PeriodicAuthMins,
 		&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
@@ -137,7 +139,7 @@ func (s *ClientConfigStore) GetByGroupID(ctx context.Context, orgID, groupID str
 func (s *ClientConfigStore) GetEffectiveForDevice(ctx context.Context, orgID, deviceID string) (*ClientConfigRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT cc.id, cc.org_id, cc.group_id, cc.group_name, cc.priority,
-		       cc.tunnel_settings, cc.features_settings, cc.private_access_settings,
+		       cc.tunnel_settings, cc.features_settings, cc.routing_settings, cc.private_access_settings,
 		       cc.install_settings, cc.tamperproof_settings,
 		       cc.session_timeout_mins, cc.periodic_auth_mins,
 		       cc.dns_servers, cc.allowed_protocols, cc.gateway_priority,
@@ -164,7 +166,7 @@ func (s *ClientConfigStore) GetEffectiveForDevice(ctx context.Context, orgID, de
 	config := &ClientConfigRecord{}
 	err := row.Scan(
 		&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-		&config.TunnelSettings, &config.FeaturesSettings, &config.PrivateAccessSettings,
+		&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
 		&config.InstallSettings, &config.TamperproofSettings,
 		&config.SessionTimeoutMins, &config.PeriodicAuthMins,
 		&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
@@ -184,7 +186,7 @@ func (s *ClientConfigStore) GetEffectiveForDevice(ctx context.Context, orgID, de
 func (s *ClientConfigStore) ListByOrgID(ctx context.Context, orgID string) ([]ClientConfigRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, org_id, group_id, group_name, priority,
-		       tunnel_settings, features_settings, private_access_settings,
+		       tunnel_settings, features_settings, routing_settings, private_access_settings,
 		       install_settings, tamperproof_settings,
 		       session_timeout_mins, periodic_auth_mins,
 		       dns_servers, allowed_protocols, gateway_priority,
@@ -205,7 +207,7 @@ func (s *ClientConfigStore) ListByOrgID(ctx context.Context, orgID string) ([]Cl
 		config := ClientConfigRecord{}
 		err := rows.Scan(
 			&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-			&config.TunnelSettings, &config.FeaturesSettings, &config.PrivateAccessSettings,
+			&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
 			&config.InstallSettings, &config.TamperproofSettings,
 			&config.SessionTimeoutMins, &config.PeriodicAuthMins,
 			&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
@@ -237,6 +239,7 @@ func (s *ClientConfigStore) Update(ctx context.Context, orgID, groupID string, c
 	config.ID = oldConfig.ID
 	config.CreatedBy = oldConfig.CreatedBy
 	config.CreatedAt = oldConfig.CreatedAt
+	config.RoutingSettings = normalizeJSONPayload(config.RoutingSettings)
 
 	err = s.db.QueryRowContext(ctx, `
 		UPDATE system_mgmt.client_configurations
@@ -244,22 +247,23 @@ func (s *ClientConfigStore) Update(ctx context.Context, orgID, groupID string, c
 		    priority = $2,
 		    tunnel_settings = $3,
 		    features_settings = $4,
-		    private_access_settings = $5,
-		    install_settings = $6,
-		    tamperproof_settings = $7,
-		    session_timeout_mins = $8,
-		    periodic_auth_mins = $9,
-		    dns_servers = $10,
-		    allowed_protocols = $11,
-		    gateway_priority = $12,
-		    updated_by = $13,
-		    updated_at = $14
-		WHERE org_id = $15 AND group_id = $16
+		    routing_settings = $5,
+		    private_access_settings = $6,
+		    install_settings = $7,
+		    tamperproof_settings = $8,
+		    session_timeout_mins = $9,
+		    periodic_auth_mins = $10,
+		    dns_servers = $11,
+		    allowed_protocols = $12,
+		    gateway_priority = $13,
+		    updated_by = $14,
+		    updated_at = $15
+		WHERE org_id = $16 AND group_id = $17
 		RETURNING version, updated_at
 	`,
 		config.GroupName,
 		config.Priority,
-		config.TunnelSettings, config.FeaturesSettings, config.PrivateAccessSettings,
+		config.TunnelSettings, config.FeaturesSettings, config.RoutingSettings, config.PrivateAccessSettings,
 		config.InstallSettings, config.TamperproofSettings,
 		config.SessionTimeoutMins, config.PeriodicAuthMins,
 		config.DNSServers, config.AllowedProtocols, config.GatewayPriority,
@@ -276,9 +280,7 @@ func (s *ClientConfigStore) Update(ctx context.Context, orgID, groupID string, c
 	}
 
 	// Log the update
-	oldSettings, _ := json.Marshal(oldConfig.TunnelSettings)
-	newSettings, _ := json.Marshal(config.TunnelSettings)
-	s.logAudit(ctx, orgID, oldConfig.ID, "update", config.UpdatedBy, oldSettings, newSettings, "Client configuration updated")
+	s.logAudit(ctx, orgID, oldConfig.ID, "update", config.UpdatedBy, clientConfigAuditPayload(oldConfig), clientConfigAuditPayload(config), "Client configuration updated")
 
 	return config, nil
 }
@@ -311,8 +313,7 @@ func (s *ClientConfigStore) Delete(ctx context.Context, orgID, groupID string) e
 	}
 
 	// Log the deletion
-	oldSettings, _ := json.Marshal(config.TunnelSettings)
-	s.logAudit(ctx, orgID, config.ID, "delete", "admin", oldSettings, nil, "Client configuration deleted")
+	s.logAudit(ctx, orgID, config.ID, "delete", "admin", clientConfigAuditPayload(config), nil, "Client configuration deleted")
 
 	return nil
 }
@@ -378,4 +379,54 @@ func (s *ClientConfigStore) logAudit(ctx context.Context, orgID, configID, actio
 	if err != nil {
 		s.logger.Error("failed to log config audit", zap.Error(err))
 	}
+}
+
+func clientConfigAuditPayload(config *ClientConfigRecord) json.RawMessage {
+	if config == nil {
+		return nil
+	}
+	payload, err := json.Marshal(struct {
+		GroupID               string          `json:"group_id"`
+		GroupName             string          `json:"group_name"`
+		Priority              int             `json:"priority"`
+		TunnelSettings        json.RawMessage `json:"tunnel_settings"`
+		FeaturesSettings      json.RawMessage `json:"features_settings"`
+		RoutingSettings       json.RawMessage `json:"routing_settings"`
+		PrivateAccessSettings json.RawMessage `json:"private_access_settings"`
+		InstallSettings       json.RawMessage `json:"install_settings"`
+		TamperproofSettings   json.RawMessage `json:"tamperproof_settings"`
+		SessionTimeoutMins    int             `json:"session_timeout_mins"`
+		PeriodicAuthMins      int             `json:"periodic_auth_mins"`
+		DNSServers            []string        `json:"dns_servers"`
+		AllowedProtocols      []string        `json:"allowed_protocols"`
+		GatewayPriority       []string        `json:"gateway_priority"`
+		Version               int             `json:"version"`
+	}{
+		GroupID:               config.GroupID,
+		GroupName:             config.GroupName,
+		Priority:              config.Priority,
+		TunnelSettings:        config.TunnelSettings,
+		FeaturesSettings:      config.FeaturesSettings,
+		RoutingSettings:       config.RoutingSettings,
+		PrivateAccessSettings: config.PrivateAccessSettings,
+		InstallSettings:       config.InstallSettings,
+		TamperproofSettings:   config.TamperproofSettings,
+		SessionTimeoutMins:    config.SessionTimeoutMins,
+		PeriodicAuthMins:      config.PeriodicAuthMins,
+		DNSServers:            config.DNSServers,
+		AllowedProtocols:      config.AllowedProtocols,
+		GatewayPriority:       config.GatewayPriority,
+		Version:               config.Version,
+	})
+	if err != nil {
+		return nil
+	}
+	return payload
+}
+
+func normalizeJSONPayload(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }

@@ -18,6 +18,7 @@ type ClientConfigRequest struct {
 	Priority              int             `json:"priority"`
 	TunnelSettings        json.RawMessage `json:"tunnel_settings" binding:"required"`
 	FeaturesSettings      json.RawMessage `json:"features_settings" binding:"required"`
+	RoutingSettings       json.RawMessage `json:"routing_settings"`
 	PrivateAccessSettings json.RawMessage `json:"private_access_settings" binding:"required"`
 	InstallSettings       json.RawMessage `json:"install_settings" binding:"required"`
 	TamperproofSettings   json.RawMessage `json:"tamperproof_settings" binding:"required"`
@@ -97,6 +98,7 @@ func (h *ClientConfigHandler) CreateClientConfig(c *gin.Context) {
 		Priority:              req.Priority,
 		TunnelSettings:        req.TunnelSettings,
 		FeaturesSettings:      req.FeaturesSettings,
+		RoutingSettings:       req.RoutingSettings,
 		PrivateAccessSettings: req.PrivateAccessSettings,
 		InstallSettings:       req.InstallSettings,
 		TamperproofSettings:   req.TamperproofSettings,
@@ -151,6 +153,7 @@ func (h *ClientConfigHandler) UpdateClientConfig(c *gin.Context) {
 		Priority:              req.Priority,
 		TunnelSettings:        req.TunnelSettings,
 		FeaturesSettings:      req.FeaturesSettings,
+		RoutingSettings:       req.RoutingSettings,
 		PrivateAccessSettings: req.PrivateAccessSettings,
 		InstallSettings:       req.InstallSettings,
 		TamperproofSettings:   req.TamperproofSettings,
@@ -271,6 +274,15 @@ func (h *ClientConfigHandler) ValidateConfig(c *gin.Context) {
 	}
 	if req.PeriodicAuthMins < 1 && req.PeriodicAuthMins != 0 {
 		errors = append(errors, "periodic_auth_mins must be >= 1")
+	}
+	if len(req.InstallSettings) > 0 {
+		settings := map[string]interface{}{}
+		_ = json.Unmarshal(req.InstallSettings, &settings)
+		if value, ok := settings["config_sync_interval_mins"].(float64); ok {
+			if value < 5 || value > 15 {
+				errors = append(errors, "install_settings.config_sync_interval_mins must be between 5 and 15")
+			}
+		}
 	}
 
 	response := gin.H{

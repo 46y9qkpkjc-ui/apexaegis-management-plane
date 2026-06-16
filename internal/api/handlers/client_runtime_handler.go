@@ -33,6 +33,7 @@ type runtimeClientProfile struct {
 	AllowedProtocols   []string              `json:"allowed_protocols"`
 	SessionTimeoutMins int                   `json:"session_timeout_mins"`
 	PeriodicAuthMins   int                   `json:"periodic_auth_mins"`
+	ConfigSyncInterval int                   `json:"config_sync_interval_mins"`
 	GatewayPreferences []string              `json:"gateway_preferences"`
 	LastSynced         string                `json:"last_synced,omitempty"`
 	Version            int                   `json:"version"`
@@ -205,14 +206,19 @@ func (h *ClientRuntimeHandler) GetRoutePolicies(c *gin.Context) {
 }
 
 type postureRequest struct {
-	CheckedAt        time.Time `json:"checked_at"`
-	Compliant        bool      `json:"compliant"`
-	Score            int       `json:"score"`
-	DiskEncrypted    bool      `json:"disk_encrypted"`
-	FirewallEnabled  bool      `json:"firewall_enabled"`
-	AntivirusRunning bool      `json:"antivirus_running"`
-	AntivirusName    string    `json:"antivirus_name"`
-	OSVersion        string    `json:"os_version"`
+	CheckedAt         time.Time                `json:"checked_at"`
+	Compliant         bool                     `json:"compliant"`
+	Score             int                      `json:"score"`
+	DiskEncrypted     bool                     `json:"disk_encrypted"`
+	FirewallEnabled   bool                     `json:"firewall_enabled"`
+	AntivirusRunning  bool                     `json:"antivirus_running"`
+	AntivirusName     string                   `json:"antivirus_name"`
+	OSVersion         string                   `json:"os_version"`
+	Applications      []map[string]interface{} `json:"applications,omitempty"`
+	RunningProcesses  []map[string]interface{} `json:"running_processes,omitempty"`
+	GhostAppCount     int                      `json:"ghost_app_count,omitempty"`
+	HighRiskAppCount  int                      `json:"high_risk_app_count,omitempty"`
+	ApplicationScanAt *time.Time               `json:"application_scan_at,omitempty"`
 }
 
 func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
@@ -291,6 +297,7 @@ func defaultRuntimeClientProfile() runtimeClientProfile {
 		AllowedProtocols:   []string{"QUIC", "TLS"},
 		SessionTimeoutMins: 480,
 		PeriodicAuthMins:   480,
+		ConfigSyncInterval: 15,
 		GatewayPreferences: []string{},
 		Version:            1,
 		PostureIntervalSec: 60,
@@ -320,22 +327,36 @@ func clientConfigToRuntimeProfile(config db.ClientConfigRecord) runtimeClientPro
 	}
 
 	settings := jsonMap(config.FeaturesSettings)
+	install := jsonMap(config.InstallSettings)
+	routing := routingSettingsMap(config)
+	dnsRouting := mapSetting(routing, "dns")
 	profile.Features.SplitTunnelEnabled = boolSetting(settings, "split_tunnel_enabled", "splitTunnelEnabled")
+	if !profile.Features.SplitTunnelEnabled {
+		mode := stringSetting(routing, "mode", "routing_mode")
+		profile.Features.SplitTunnelEnabled = mode == "split_tunnel"
+	}
 	profile.Features.CollabOptimization = boolSetting(settings, "collab_optimization", "collabOptimization")
 	profile.Features.BiometricRequired = boolSetting(settings, "biometric_required", "biometricRequired")
 	tunnel := jsonMap(config.TunnelSettings)
 	profile.Features.DevicePostureCheck = boolSetting(tunnel, "device_posture_enabled")
-	dnsRouting := mapSetting(settings, "dns_routing")
-	profile.DNSRouting.Enabled = boolSetting(dnsRouting, "enabled")
-	profile.DNSRouting.Resolver = stringSetting(dnsRouting, "resolver")
-	profile.DNSRouting.Exceptions = stringSliceSetting(dnsRouting, "exceptions", "fqdns")
+	if len(dnsRouting) == 0 {
+		dnsRouting = mapSetting(settings, "dns_routing")
+	}
+	profile.DNSRouting.Enabled = boolSetting(dnsRouting, "enabled") || len(stringSliceSetting(dnsRouting, "bypass_domains", "exceptions", "fqdns")) > 0
+	if resolver := stringSetting(dnsRouting, "resolver"); resolver != "" {
+		profile.DNSRouting.Resolver = resolver
+	}
+	profile.DNSRouting.Exceptions = stringSliceSetting(dnsRouting, "bypass_domains", "exceptions", "fqdns")
 	profile.Features.DNSRouting = profile.DNSRouting.Enabled
 	profile.Features.OtherVPNBypass = boolSetting(settings, "other_vpn_bypass", "otherVpnBypass")
-	profile.Features.SSLInspection = boolSetting(settings, "ssl_inspection", "sslInspection")
+	profile.Features.SSLInspection = false
 	profile.Features.DLPEnabled = boolSetting(mapSetting(settings, "dlp"), "enabled")
 	profile.Features.LogForwarding = boolSetting(settings, "log_forwarding", "logForwarding")
 	if interval := intSetting(tunnel, "posture_check_interval_seconds"); interval >= 15 {
 		profile.PostureIntervalSec = interval
+	}
+	if interval := clampConfigSyncInterval(intSetting(install, "config_sync_interval_mins")); interval > 0 {
+		profile.ConfigSyncInterval = interval
 	}
 	tamper := jsonMap(config.TamperproofSettings)
 	failClose := mapSetting(tamper, "fail_close_exceptions")
@@ -373,6 +394,10 @@ func mapSetting(values map[string]interface{}, key string) map[string]interface{
 }
 
 func clientConfigToRoutePolicies(config db.ClientConfigRecord) []runtimeRoutePolicy {
+	if policies := routePoliciesFromRoutingSettings(routingSettingsMap(config)); len(policies) > 0 {
+		return normalizeRuntimePolicies(policies)
+	}
+
 	settings := jsonMap(config.PrivateAccessSettings)
 	var policies []runtimeRoutePolicy
 	policies = append(policies, routePoliciesFromSetting(settings["route_policies"])...)
@@ -386,15 +411,7 @@ func clientConfigToRoutePolicies(config db.ClientConfigRecord) []runtimeRoutePol
 			policies = append(policies, runtimeRoutePolicy{ID: "dns-routing-exceptions", Name: "DNS routing exceptions", PolicyAction: "bypass", MatchType: "dns_query", Patterns: patterns, Enabled: true, Resolver: stringSetting(dnsRouting, "resolver")})
 		}
 	}
-	for i := range policies {
-		if policies[i].Priority == 0 {
-			policies[i].Priority = (i + 1) * 10
-		}
-		if policies[i].ID == "" {
-			policies[i].ID = "route-policy-" + string(rune('a'+(i%26)))
-		}
-	}
-	return policies
+	return normalizeRuntimePolicies(policies)
 }
 
 func routePoliciesFromSetting(value interface{}) []runtimeRoutePolicy {
@@ -518,4 +535,157 @@ func stringSliceSetting(values map[string]interface{}, keys ...string) []string 
 		}
 	}
 	return nil
+}
+
+func routingSettingsMap(config db.ClientConfigRecord) map[string]interface{} {
+	settings := jsonMap(config.RoutingSettings)
+	if len(settings) > 0 {
+		return settings
+	}
+
+	legacy := map[string]interface{}{}
+	privateSettings := jsonMap(config.PrivateAccessSettings)
+	if len(privateSettings) > 0 {
+		legacy["traffic"] = map[string]interface{}{
+			"route_policies": privateSettings["route_policies"],
+			"traffic_bypass": privateSettings["traffic_bypass"],
+			"dns_exceptions": privateSettings["dns_exceptions"],
+		}
+	}
+	featureSettings := jsonMap(config.FeaturesSettings)
+	if dns := mapSetting(featureSettings, "dns_routing"); len(dns) > 0 {
+		legacy["dns"] = dns
+	}
+	return legacy
+}
+
+func routePoliciesFromRoutingSettings(settings map[string]interface{}) []runtimeRoutePolicy {
+	if len(settings) == 0 {
+		return nil
+	}
+
+	dns := mapSetting(settings, "dns")
+	traffic := mapSetting(settings, "traffic")
+	policies := []runtimeRoutePolicy{}
+
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-dns-tunnel-exceptions",
+		"DNS tunnel exceptions",
+		"tunnel",
+		"dns_query",
+		stringSliceSetting(dns, "tunnel_exceptions"),
+		10,
+		stringSetting(dns, "resolver"),
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-tunnel-process-exceptions",
+		"Tunnel process exceptions",
+		"tunnel",
+		"process",
+		stringSliceSetting(traffic, "tunnel_process_exceptions"),
+		20,
+		"",
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-tunnel-domain-exceptions",
+		"Tunnel domain exceptions",
+		"tunnel",
+		"domain",
+		stringSliceSetting(traffic, "tunnel_domain_exceptions"),
+		30,
+		"",
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-tunnel-network-exceptions",
+		"Tunnel network exceptions",
+		"tunnel",
+		"domain",
+		stringSliceSetting(traffic, "tunnel_network_exceptions"),
+		40,
+		"",
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-dns-bypass-domains",
+		"DNS bypass domains",
+		"bypass",
+		"dns_query",
+		stringSliceSetting(dns, "bypass_domains", "exceptions", "fqdns"),
+		100,
+		stringSetting(dns, "resolver"),
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-bypass-processes",
+		"Bypass processes",
+		"bypass",
+		"process",
+		stringSliceSetting(traffic, "bypass_processes"),
+		110,
+		"",
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-bypass-domains",
+		"Bypass domains",
+		"bypass",
+		"domain",
+		stringSliceSetting(traffic, "bypass_domains"),
+		120,
+		"",
+	)
+	policies = appendPolicyIfPatterns(
+		policies,
+		"route-traffic-bypass-networks",
+		"Bypass networks",
+		"bypass",
+		"domain",
+		stringSliceSetting(traffic, "bypass_networks"),
+		130,
+		"",
+	)
+	return policies
+}
+
+func appendPolicyIfPatterns(policies []runtimeRoutePolicy, id, name, action, matchType string, patterns []string, priority int, resolver string) []runtimeRoutePolicy {
+	if len(patterns) == 0 {
+		return policies
+	}
+	return append(policies, runtimeRoutePolicy{
+		ID:           id,
+		Name:         name,
+		PolicyAction: action,
+		MatchType:    matchType,
+		Patterns:     patterns,
+		Enabled:      true,
+		Priority:     priority,
+		Resolver:     resolver,
+	})
+}
+
+func normalizeRuntimePolicies(policies []runtimeRoutePolicy) []runtimeRoutePolicy {
+	for i := range policies {
+		if policies[i].Priority == 0 {
+			policies[i].Priority = (i + 1) * 10
+		}
+		if policies[i].ID == "" {
+			policies[i].ID = "route-policy-" + string(rune('a'+(i%26)))
+		}
+	}
+	return policies
+}
+
+func clampConfigSyncInterval(value int) int {
+	switch {
+	case value < 5:
+		return 15
+	case value > 15:
+		return 15
+	default:
+		return value
+	}
 }
