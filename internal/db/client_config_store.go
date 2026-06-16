@@ -3,8 +3,11 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -57,6 +60,12 @@ type ClientConfigStore struct {
 	logger *zap.Logger
 }
 
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+type stringSliceScan []string
+
 // NewClientConfigStore creates a new client config store
 func NewClientConfigStore(db *DB, logger *zap.Logger) *ClientConfigStore {
 	return &ClientConfigStore{db: db, logger: logger}
@@ -66,6 +75,85 @@ func NewClientConfigStore(db *DB, logger *zap.Logger) *ClientConfigStore {
 func IsUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func (s *stringSliceScan) Scan(src any) error {
+	switch value := src.(type) {
+	case nil:
+		*s = nil
+		return nil
+	case []string:
+		*s = append((*s)[:0], value...)
+		return nil
+	case string:
+		return s.fromString(value)
+	case []byte:
+		return s.fromString(string(value))
+	default:
+		return fmt.Errorf("unsupported string slice scan source %T", src)
+	}
+}
+
+func (s *stringSliceScan) fromString(raw string) error {
+	raw = strings.TrimSpace(raw)
+	switch raw {
+	case "", "{}", "[]":
+		*s = []string{}
+		return nil
+	}
+
+	if strings.HasPrefix(raw, "[") {
+		var values []string
+		if err := json.Unmarshal([]byte(raw), &values); err != nil {
+			return err
+		}
+		*s = values
+		return nil
+	}
+
+	if strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}") {
+		raw = raw[1 : len(raw)-1]
+	}
+
+	reader := csv.NewReader(strings.NewReader(raw))
+	reader.TrimLeadingSpace = true
+	fields, err := reader.Read()
+	if err != nil {
+		return err
+	}
+
+	values := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		values = append(values, field)
+	}
+	*s = values
+	return nil
+}
+
+func scanClientConfig(scanner rowScanner, config *ClientConfigRecord) error {
+	var dnsServers stringSliceScan
+	var allowedProtocols stringSliceScan
+	var gatewayPriority stringSliceScan
+
+	if err := scanner.Scan(
+		&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
+		&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
+		&config.InstallSettings, &config.TamperproofSettings,
+		&config.SessionTimeoutMins, &config.PeriodicAuthMins,
+		&dnsServers, &allowedProtocols, &gatewayPriority,
+		&config.Version, &config.CreatedAt, &config.UpdatedAt, &config.CreatedBy, &config.UpdatedBy,
+	); err != nil {
+		return err
+	}
+
+	config.DNSServers = []string(dnsServers)
+	config.AllowedProtocols = []string(allowedProtocols)
+	config.GatewayPriority = []string(gatewayPriority)
+	return nil
 }
 
 // Create creates a new client configuration
@@ -122,14 +210,7 @@ func (s *ClientConfigStore) GetByGroupID(ctx context.Context, orgID, groupID str
 	`, orgID, groupID)
 
 	config := &ClientConfigRecord{}
-	err := row.Scan(
-		&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-		&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
-		&config.InstallSettings, &config.TamperproofSettings,
-		&config.SessionTimeoutMins, &config.PeriodicAuthMins,
-		&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
-		&config.Version, &config.CreatedAt, &config.UpdatedAt, &config.CreatedBy, &config.UpdatedBy,
-	)
+	err := scanClientConfig(row, config)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -172,14 +253,7 @@ func (s *ClientConfigStore) GetEffectiveForDevice(ctx context.Context, orgID, de
 	`, orgID, deviceID)
 
 	config := &ClientConfigRecord{}
-	err := row.Scan(
-		&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-		&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
-		&config.InstallSettings, &config.TamperproofSettings,
-		&config.SessionTimeoutMins, &config.PeriodicAuthMins,
-		&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
-		&config.Version, &config.CreatedAt, &config.UpdatedAt, &config.CreatedBy, &config.UpdatedBy,
-	)
+	err := scanClientConfig(row, config)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
@@ -213,14 +287,7 @@ func (s *ClientConfigStore) ListByOrgID(ctx context.Context, orgID string) ([]Cl
 	configs := make([]ClientConfigRecord, 0)
 	for rows.Next() {
 		config := ClientConfigRecord{}
-		err := rows.Scan(
-			&config.ID, &config.OrgID, &config.GroupID, &config.GroupName, &config.Priority,
-			&config.TunnelSettings, &config.FeaturesSettings, &config.RoutingSettings, &config.PrivateAccessSettings,
-			&config.InstallSettings, &config.TamperproofSettings,
-			&config.SessionTimeoutMins, &config.PeriodicAuthMins,
-			&config.DNSServers, &config.AllowedProtocols, &config.GatewayPriority,
-			&config.Version, &config.CreatedAt, &config.UpdatedAt, &config.CreatedBy, &config.UpdatedBy,
-		)
+		err := scanClientConfig(rows, &config)
 		if err != nil {
 			s.logger.Error("failed to scan client config row", zap.Error(err))
 			continue
