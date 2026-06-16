@@ -3,9 +3,11 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 
 	"github.com/zcp/management-plane/internal/db"
@@ -33,6 +35,23 @@ type ClientConfigRequest struct {
 type ClientConfigHandler struct {
 	store  *db.ClientConfigStore
 	logger *zap.Logger
+}
+
+func clientConfigStoreErrorMessage(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return "configuration already exists for this group"
+		case "42P01":
+			return "client configuration table is missing in the database"
+		case "42703":
+			return "client configuration schema is out of date in the database"
+		case "23502":
+			return "client configuration is missing a required value"
+		}
+	}
+	return "failed to create configuration"
 }
 
 // NewClientConfigHandler creates a new client config handler
@@ -127,7 +146,7 @@ func (h *ClientConfigHandler) CreateClientConfig(c *gin.Context) {
 			}
 		}
 		h.logger.Error("failed to create config", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create configuration"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": clientConfigStoreErrorMessage(err)})
 		return
 	}
 
