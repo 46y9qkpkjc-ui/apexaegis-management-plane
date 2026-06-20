@@ -379,7 +379,7 @@ func (s *DeviceStore) RegisterMTLSDevice(ctx context.Context, reg DeviceRegistra
 			mtls_cert_serial = excluded.mtls_cert_serial,
 			mtls_cert_fingerprint_sha256 = excluded.mtls_cert_fingerprint_sha256,
 			mtls_cert_not_after = excluded.mtls_cert_not_after,
-			client_user_id = excluded.client_user_id,
+			client_user_id = COALESCE(excluded.client_user_id, system_mgmt.devices.client_user_id),
 			last_seen = now(),
 			status = 'active',
 			updated_at = now()
