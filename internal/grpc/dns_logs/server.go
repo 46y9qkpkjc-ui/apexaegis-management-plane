@@ -1,3 +1,11 @@
+//go:build dns_logs_wip
+
+// Package dns_logs is incomplete WIP: its protobuf types (DNSLogService,
+// GetDNSLogsRequest, DNSAccessLog, …) were lost when the proto package was
+// pulled in-tree, so it does not compile. Nothing imports it, so excluding it
+// from the default build is a no-op for the server binary; it keeps
+// `go build ./...` and CI green until the .proto is reconstructed during the
+// DNS-security gRPC slice.
 package dns_logs
 
 import (
