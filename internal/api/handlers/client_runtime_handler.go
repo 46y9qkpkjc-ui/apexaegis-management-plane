@@ -59,6 +59,7 @@ type runtimeClientFeatures struct {
 	BiometricRequired  bool `json:"biometric_required"`
 	DevicePostureCheck bool `json:"device_posture_check"`
 	DNSRouting         bool `json:"dns_routing"`
+	DNSSecurity        bool `json:"dns_security"`
 	OtherVPNBypass     bool `json:"other_vpn_bypass"`
 	SSLInspection      bool `json:"ssl_inspection"`
 	DLPEnabled         bool `json:"dlp_enabled"`
@@ -348,6 +349,11 @@ func clientConfigToRuntimeProfile(config db.ClientConfigRecord) runtimeClientPro
 	}
 	profile.DNSRouting.Exceptions = stringSliceSetting(dnsRouting, "bypass_domains", "exceptions", "fqdns")
 	profile.Features.DNSRouting = profile.DNSRouting.Enabled
+	// dns_security only controls whether DNS is forwarded to the tunnel resolver
+	// for threat filtering. The per-category allow/deny policy (NRD, NOD, DGA,
+	// Malicious, Spyware) is configured separately by the administrator and
+	// enforced at the gateway.
+	profile.Features.DNSSecurity = boolSetting(settings, "dns_security", "dnsSecurity")
 	profile.Features.OtherVPNBypass = boolSetting(settings, "other_vpn_bypass", "otherVpnBypass")
 	profile.Features.SSLInspection = false
 	profile.Features.DLPEnabled = boolSetting(mapSetting(settings, "dlp"), "enabled")
