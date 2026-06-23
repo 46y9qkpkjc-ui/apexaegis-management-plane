@@ -43,3 +43,29 @@ func TestStorePolicySource_ParsesFlagAndCategories(t *testing.T) {
 		t.Fatal("g3 with no dns_security must be disabled")
 	}
 }
+
+// The gateway may present either the SCIM group ID or the IdP group name, so the
+// policy must be retrievable under both keys.
+func TestStorePolicySource_EmitsIDAndName(t *testing.T) {
+	src := StorePolicySource{Store: fakeLister{
+		{GroupID: "uuid-123", GroupName: "IT Team", FeaturesSettings: json.RawMessage(`{"dns_security":true,"dns_security_categories":{"malicious":"deny"}}`)},
+	}}
+
+	pols, err := src.Policies(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byGroup := map[string]GroupPolicy{}
+	for _, p := range pols {
+		byGroup[p.GroupID] = p
+	}
+	for _, key := range []string{"uuid-123", "IT Team"} {
+		gp, ok := byGroup[key]
+		if !ok {
+			t.Fatalf("policy missing under key %q", key)
+		}
+		if !gp.Policy.Enabled || gp.Policy.Categories["malicious"] != "deny" {
+			t.Fatalf("policy under %q = %+v, want enabled malicious=deny", key, gp.Policy)
+		}
+	}
+}

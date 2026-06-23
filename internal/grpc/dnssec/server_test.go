@@ -58,12 +58,22 @@ func TestGetDNSSecurity_RevisionShortCircuit(t *testing.T) {
 		Feed:     fakeFeed{domains: map[string][]string{"x.example": {"nrd"}}, revision: "rev9"},
 	}
 
-	// Up-to-date gateway: revision matches -> revision only, no payload transfer.
-	resp, err := s.GetDNSSecurity(context.Background(), &apexaegisv1.GetDNSSecurityRequest{SinceRevision: "rev9"})
+	// A first full sync (empty since_revision) reports the current revision,
+	// which is derived from the feed AND the policy set.
+	full, err := s.GetDNSSecurity(context.Background(), &apexaegisv1.GetDNSSecurityRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Revision != "rev9" || len(resp.Policies) != 0 || len(resp.Domains) != 0 {
+	if full.Revision == "" || len(full.Policies) != 1 || len(full.Domains) != 1 {
+		t.Fatalf("full sync should carry payload + revision, got %+v", full)
+	}
+
+	// Up-to-date gateway: revision matches -> revision only, no payload transfer.
+	resp, err := s.GetDNSSecurity(context.Background(), &apexaegisv1.GetDNSSecurityRequest{SinceRevision: full.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Revision != full.Revision || len(resp.Policies) != 0 || len(resp.Domains) != 0 {
 		t.Fatalf("up-to-date gateway should get revision-only, got %+v", resp)
 	}
 
@@ -74,5 +84,25 @@ func TestGetDNSSecurity_RevisionShortCircuit(t *testing.T) {
 	}
 	if len(resp.Policies) != 1 || len(resp.Domains) != 1 {
 		t.Fatalf("stale gateway should get full payload, got %+v", resp)
+	}
+}
+
+// Changing a group's policy with an unchanged feed must still change the
+// revision, so an up-to-date gateway is not short-circuited past the update.
+func TestGetDNSSecurity_RevisionTracksPolicy(t *testing.T) {
+	feed := fakeFeed{domains: map[string][]string{"x.example": {"nrd"}}, revision: "rev9"}
+	deny := &Server{Policies: fakePolicies{{GroupID: "g1", Policy: dnssecurity.Policy{Enabled: true, Categories: map[string]string{"nrd": "deny"}}}}, Feed: feed}
+	allow := &Server{Policies: fakePolicies{{GroupID: "g1", Policy: dnssecurity.Policy{Enabled: true, Categories: map[string]string{"nrd": "allow"}}}}, Feed: feed}
+
+	d, err := deny.GetDNSSecurity(context.Background(), &apexaegisv1.GetDNSSecurityRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := allow.GetDNSSecurity(context.Background(), &apexaegisv1.GetDNSSecurityRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Revision == a.Revision {
+		t.Fatal("revision must differ when a category policy changes, even with an unchanged feed")
 	}
 }

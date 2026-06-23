@@ -7,6 +7,8 @@ package dnssec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 
 	apexaegisv1 "github.com/apexaegis/proto/apexaegis/v1/gen"
@@ -28,7 +30,9 @@ type PolicySource interface {
 }
 
 // FeedSource yields the current categorized threat domains and a revision that
-// changes whenever the policy set or feed content changes.
+// changes whenever the feed content changes. The server combines this with a
+// hash of the policy set (combinedRevision) so policy-only changes are reflected
+// in the revision sent to gateways too.
 type FeedSource interface {
 	Snapshot(ctx context.Context) (domains map[string][]string, revision string, err error)
 }
@@ -44,16 +48,20 @@ type Server struct {
 // already matches the latest, only the revision is returned (no payload), so an
 // up-to-date gateway transfers nothing.
 func (s *Server) GetDNSSecurity(ctx context.Context, req *apexaegisv1.GetDNSSecurityRequest) (*apexaegisv1.DNSSecuritySync, error) {
-	domains, revision, err := s.Feed.Snapshot(ctx)
+	domains, feedRevision, err := s.Feed.Snapshot(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if r := req.GetSinceRevision(); r != "" && r == revision {
-		return &apexaegisv1.DNSSecuritySync{Revision: revision}, nil
 	}
 	policies, err := s.Policies.Policies(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// The revision must reflect BOTH the feed and the policy set: an admin can
+	// change a group's policy (flag, categories) with the feed unchanged, and
+	// that must still invalidate the gateway's cached snapshot.
+	revision := combinedRevision(feedRevision, policies)
+	if r := req.GetSinceRevision(); r != "" && r == revision {
+		return &apexaegisv1.DNSSecuritySync{Revision: revision}, nil
 	}
 	return BuildSync(policies, domains, revision), nil
 }
@@ -80,4 +88,39 @@ func BuildSync(policies []GroupPolicy, domains map[string][]string, revision str
 		out.Domains = append(out.Domains, &apexaegisv1.ThreatDomain{Domain: d, Categories: domains[d]})
 	}
 	return out
+}
+
+// combinedRevision derives a stable 16-hex revision from the feed revision and
+// the policy set, so a policy change with an unchanged feed (or a feed change
+// with unchanged policy) still yields a new revision and invalidates the
+// gateway's cached snapshot. Deterministic: policies and categories are sorted.
+func combinedRevision(feedRevision string, policies []GroupPolicy) string {
+	sorted := make([]GroupPolicy, len(policies))
+	copy(sorted, policies)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GroupID < sorted[j].GroupID })
+
+	h := sha256.New()
+	h.Write([]byte(feedRevision))
+	h.Write([]byte{0})
+	for _, p := range sorted {
+		h.Write([]byte(p.GroupID))
+		if p.Policy.Enabled {
+			h.Write([]byte{'=', '1'})
+		} else {
+			h.Write([]byte{'=', '0'})
+		}
+		cats := make([]string, 0, len(p.Policy.Categories))
+		for c := range p.Policy.Categories {
+			cats = append(cats, c)
+		}
+		sort.Strings(cats)
+		for _, c := range cats {
+			h.Write([]byte(c))
+			h.Write([]byte{':'})
+			h.Write([]byte(p.Policy.Categories[c]))
+			h.Write([]byte{','})
+		}
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
