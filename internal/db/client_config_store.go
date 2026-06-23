@@ -298,6 +298,37 @@ func (s *ClientConfigStore) ListByOrgID(ctx context.Context, orgID string) ([]Cl
 	return configs, rows.Err()
 }
 
+// ListAll retrieves every client configuration across all organizations. Used
+// by the DNS-security sync to build per-group policies for every gateway.
+func (s *ClientConfigStore) ListAll(ctx context.Context) ([]ClientConfigRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, org_id, group_id, group_name, priority,
+		       tunnel_settings, features_settings, routing_settings, private_access_settings,
+		       install_settings, tamperproof_settings,
+		       session_timeout_mins, periodic_auth_mins,
+		       dns_servers, allowed_protocols, gateway_priority,
+		       version, created_at, updated_at, created_by, updated_by
+		FROM system_mgmt.client_configurations
+		ORDER BY org_id, group_id
+	`)
+	if err != nil {
+		s.logger.Error("failed to list all client configs", zap.Error(err))
+		return nil, err
+	}
+	defer rows.Close()
+
+	configs := make([]ClientConfigRecord, 0)
+	for rows.Next() {
+		config := ClientConfigRecord{}
+		if err := scanClientConfig(rows, &config); err != nil {
+			s.logger.Error("failed to scan client config row", zap.Error(err))
+			continue
+		}
+		configs = append(configs, config)
+	}
+	return configs, rows.Err()
+}
+
 // Update updates a client configuration
 func (s *ClientConfigStore) Update(ctx context.Context, orgID, groupID string, config *ClientConfigRecord) (*ClientConfigRecord, error) {
 	// Get the old values for audit

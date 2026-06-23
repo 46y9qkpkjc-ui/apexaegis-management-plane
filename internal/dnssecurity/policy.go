@@ -42,14 +42,27 @@ type Policy struct {
 // on, an unconfigured category defaults to deny (fail-secure): a feed update
 // can't silently allow a new category that the admin never reviewed.
 func FromSettings(flagEnabled bool, settings map[string]any) Policy {
+	raw, _ := settings["categories"].(map[string]any)
+	categories := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			categories[k] = s
+		}
+	}
+	return FromFlags(flagEnabled, categories)
+}
+
+// FromFlags builds the effective policy from the resolved flag and a typed
+// category map (used by callers that already parsed the stored config). The
+// guard and fail-secure defaults are identical to FromSettings.
+func FromFlags(flagEnabled bool, categories map[string]string) Policy {
 	if !flagEnabled {
 		return Policy{Enabled: false}
 	}
 	p := Policy{Enabled: true, Categories: make(map[string]string, len(Categories))}
-	raw, _ := settings["categories"].(map[string]any)
 	for _, cat := range Categories {
 		action := ActionDeny // fail-secure default
-		if v, ok := raw[cat].(string); ok && (v == ActionAllow || v == ActionDeny) {
+		if v, ok := categories[cat]; ok && (v == ActionAllow || v == ActionDeny) {
 			action = v
 		}
 		p.Categories[cat] = action
