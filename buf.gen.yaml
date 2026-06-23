@@ -1,0 +1,12 @@
+version: v2
+plugins:
+  # The `module=` option strips the go_package module prefix so files land at
+  # proto/<path-after-module>/..., matching the existing gateway gen layout.
+  - local: protoc-gen-go
+    out: proto
+    opt:
+      - module=github.com/apexaegis/proto
+  - local: protoc-gen-go-grpc
+    out: proto
+    opt:
+      - module=github.com/apexaegis/proto
