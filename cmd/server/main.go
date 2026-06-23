@@ -29,6 +29,7 @@ import (
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dot1x"
 	"github.com/zcp/management-plane/internal/gateway"
+	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
 	"github.com/zcp/management-plane/internal/policy"
@@ -37,6 +38,7 @@ import (
 	"github.com/zcp/management-plane/internal/security"
 	"github.com/zcp/management-plane/internal/segment"
 	"github.com/zcp/management-plane/internal/threat-intel"
+	"github.com/zcp/management-plane/internal/threatfeed"
 	"github.com/zcp/management-plane/internal/validation"
 	"github.com/zcp/management-plane/internal/websocket"
 )
@@ -812,6 +814,24 @@ func main() {
 	)
 	httpLis := mux.Match(cmux.Any())
 
+	// DNS security: per-group policy + threat-feed sync served to gateways over
+	// the same gRPC server. Feeds come from DNS_SECURITY_FEEDS ("category=url,...");
+	// default to abuse.ch URLhaus (malware) when unset.
+	dnsFeedProviders := threatfeed.ParseFeedSpecs(os.Getenv("DNS_SECURITY_FEEDS"))
+	if len(dnsFeedProviders) == 0 {
+		dnsFeedProviders = []threatfeed.Provider{&threatfeed.DomainListProvider{
+			ProviderName: "urlhaus",
+			Cat:          "malicious",
+			URL:          "https://urlhaus.abuse.ch/downloads/hostfile/",
+		}}
+	}
+	dnsFeedStore := threatfeed.NewStore(&threatfeed.Aggregator{Providers: dnsFeedProviders})
+	go dnsFeedStore.Run(ctx, 30*time.Minute)
+	dnsSecurityServer := &dnssec.Server{
+		Policies: dnssec.StorePolicySource{Store: clientConfigStore},
+		Feed:     dnsFeedStore,
+	}
+
 	// gRPC server
 	grpcSrv := grpcserver.NewServer(grpcserver.Config{
 		CertFile:              os.Getenv("GRPC_TLS_CERT_FILE"),
@@ -823,6 +843,7 @@ func main() {
 		PolicyStore: policyStore,
 		Registry:    gwRegistry,
 		Logger:      logger,
+		DNSSecurity: dnsSecurityServer,
 	})
 	go func() {
 		if err := grpcSrv.ServeListener(ctx, grpcLis); err != nil {

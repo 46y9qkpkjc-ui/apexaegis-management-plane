@@ -25,8 +25,10 @@ import (
 	"sync"
 	"time"
 
+	apexaegisv1 "github.com/apexaegis/proto/apexaegis/v1/gen"
 	pb "github.com/apexaegis/proto/gateway/v1/gen"
 	gw "github.com/zcp/management-plane/internal/gateway"
+	dnssec "github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/policy"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -46,6 +48,7 @@ type Deps struct {
 	PolicyStore policy.PolicyStore
 	Registry    *gw.Registry
 	Logger      *zap.Logger
+	DNSSecurity *dnssec.Server // optional; nil skips DNS-security service registration
 }
 
 // Config for the gRPC server.
@@ -112,6 +115,10 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 
 	grpcServer := grpc.NewServer(opts...)
 	pb.RegisterGatewayControlServer(grpcServer, s)
+	if s.deps.DNSSecurity != nil {
+		apexaegisv1.RegisterDNSSecurityServiceServer(grpcServer, s.deps.DNSSecurity)
+		s.logger.Info("DNS security gRPC service registered")
+	}
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	healthSrv.SetServingStatus(pb.GatewayControl_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)

@@ -190,3 +190,33 @@ func (a *Aggregator) Collect(ctx context.Context) (map[string][]string, error) {
 	}
 	return out, err
 }
+
+// ParseFeedSpecs builds DomainListProviders from a "category=url,category=url"
+// string (e.g. the DNS_SECURITY_FEEDS env var), so open-source feeds are
+// configured without code changes. Blank/malformed entries are skipped. A
+// commercial provider such as zvelo would instead be added in code behind the
+// same Provider interface.
+func ParseFeedSpecs(spec string) []Provider {
+	var providers []Provider
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		cat := strings.TrimSpace(kv[0])
+		url := strings.TrimSpace(kv[1])
+		if cat == "" || url == "" {
+			continue
+		}
+		providers = append(providers, &DomainListProvider{
+			ProviderName: cat + "-feed",
+			Cat:          cat,
+			URL:          url,
+		})
+	}
+	return providers
+}
