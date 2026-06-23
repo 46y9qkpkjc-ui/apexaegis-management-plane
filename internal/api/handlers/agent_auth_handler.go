@@ -91,11 +91,20 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		return
 	}
 
+	// Resolve the device owner's groups so the agent token carries them to the
+	// gateway for per-group policy. Best-effort: an unlinked device (no SSO
+	// login yet) yields no groups and the token is simply issued without them.
+	groups, gerr := h.deviceStore.GroupNamesForDevice(c.Request.Context(), reg.ID)
+	if gerr != nil {
+		h.logger.Warn("failed to resolve device groups", zap.String("device_id", deviceID), zap.Error(gerr))
+	}
+
 	jwt, expiresAt, err := h.authStore.IssueAgentToken(
 		req.TenantID,
 		reg.ID,
 		identity.FingerprintSHA256,
 		identity.Serial,
+		groups,
 	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))

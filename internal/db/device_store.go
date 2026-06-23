@@ -415,6 +415,34 @@ func nilIfEmptyString(value string) interface{} {
 	return value
 }
 
+// GroupNamesForDevice returns the display names of the groups the device's
+// linked client user belongs to. Empty when the device isn't linked to a user
+// yet (e.g. the agent bootstrapped over mTLS before the desktop SSO login that
+// calls LinkClientUser). The gateway uses these for per-group policy.
+func (s *DeviceStore) GroupNamesForDevice(ctx context.Context, deviceRowID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT g.display_name
+		  FROM system_mgmt.devices d
+		  JOIN system_mgmt.client_user_groups m ON m.user_id = d.client_user_id
+		  JOIN system_mgmt.groups g ON g.id = m.group_id
+		 WHERE d.id = $1
+		 ORDER BY g.display_name
+	`, deviceRowID)
+	if err != nil {
+		return nil, fmt.Errorf("group names for device: %w", err)
+	}
+	defer rows.Close()
+	var groups []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		groups = append(groups, name)
+	}
+	return groups, rows.Err()
+}
+
 // LinkClientUser binds an already-registered mTLS device row to the SCIM client
 // user that authenticated through desktop SSO. Runtime client configuration is
 // then resolved from that user's group membership.

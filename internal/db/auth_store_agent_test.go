@@ -11,7 +11,7 @@ func TestIssueAgentTokenBindsDeviceCertificate(t *testing.T) {
 	secret := []byte("test-secret")
 	store := NewAuthStore(nil, secret, zap.NewNop())
 
-	tokenString, _, err := store.IssueAgentToken("tenant-1", "device-1", "aabbcc", "1234")
+	tokenString, _, err := store.IssueAgentToken("tenant-1", "device-1", "aabbcc", "1234", []string{"IT Team"})
 	if err != nil {
 		t.Fatalf("IssueAgentToken failed: %v", err)
 	}
@@ -30,12 +30,16 @@ func TestIssueAgentTokenBindsDeviceCertificate(t *testing.T) {
 	if claims["device_cert_serial"] != "1234" {
 		t.Fatalf("unexpected serial claim: %v", claims["device_cert_serial"])
 	}
+	groups, ok := claims["groups"].([]interface{})
+	if !ok || len(groups) != 1 || groups[0] != "IT Team" {
+		t.Fatalf("expected groups claim [IT Team], got %v", claims["groups"])
+	}
 }
 
 func TestIssueAgentTokenRequiresDeviceCertificate(t *testing.T) {
 	store := NewAuthStore(nil, []byte("test-secret"), zap.NewNop())
 
-	if _, _, err := store.IssueAgentToken("tenant-1", "device-1", "", ""); err == nil {
+	if _, _, err := store.IssueAgentToken("tenant-1", "device-1", "", "", nil); err == nil {
 		t.Fatal("expected missing device certificate identity to be rejected")
 	}
 }

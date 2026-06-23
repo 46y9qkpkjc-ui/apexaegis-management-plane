@@ -343,7 +343,7 @@ func (s *AuthStore) IssueTokens(ctx context.Context, u *AuthUser, ipAddr, userAg
 
 // IssueAgentToken generates a short-lived JWT bound to a registered device
 // certificate. Gateways compare these claims with the verified TLS peer cert.
-func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string) (string, time.Time, error) {
+func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string) (string, time.Time, error) {
 	now := time.Now()
 	expiresAt := now.Add(15 * time.Minute)
 	if deviceID == "" {
@@ -363,6 +363,11 @@ func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, cert
 		"iat":                            now.Unix(),
 		"exp":                            expiresAt.Unix(),
 		"iss":                            "apexaegis-management-plane",
+	}
+	// Carry the device owner's groups so the gateway can enforce per-group
+	// policy (DNS security, etc.). Empty until the device is linked to a user.
+	if len(groups) > 0 {
+		claims["groups"] = groups
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.jwtSecret)
