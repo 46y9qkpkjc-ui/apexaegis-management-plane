@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package apexaegis.v1;
+
+option go_package = "github.com/apexaegis/proto/apexaegis/v1/gen;apexaegisv1";
+
+// DNS security policy + threat-feed sync, pushed from the management plane to
+// gateways so they can filter DNS at L7. The per-group policy (category
+// allow/deny) travels with the categorized threat-domain set.
+
+// DNSSecurityPolicy is one group's effective policy. When enabled is false the
+// gateway must apply no category blocking for the group or its members, and
+// categories is empty — the management plane enforces that guard, so a disabled
+// dns_security flag can never produce a block.
+message DNSSecurityPolicy {
+  string group_id = 1;
+  bool enabled = 2;
+  map<string, string> categories = 3; // category -> "allow" | "deny"
+}
+
+// ThreatDomain is a domain and the categories the feed tagged it with
+// (nrd, nod, dga, malicious, spyware).
+message ThreatDomain {
+  string domain = 1;
+  repeated string categories = 2;
+}
+
+// DNSSecuritySync is the full payload for a gateway: every group's policy plus
+// the categorized threat domains. revision lets the gateway skip unchanged
+// pushes and enables incremental delivery later.
+message DNSSecuritySync {
+  string revision = 1;
+  repeated DNSSecurityPolicy policies = 2;
+  repeated ThreatDomain domains = 3;
+}
+
+message GetDNSSecurityRequest {
+  string gateway_id = 1;
+  string since_revision = 2; // empty requests a full snapshot
+}
+
+// DNSSecurityService delivers DNS security policy + feed to gateways.
+service DNSSecurityService {
+  // GetDNSSecurity returns the current snapshot, or an empty revision-only
+  // response when since_revision already matches the latest.
+  rpc GetDNSSecurity(GetDNSSecurityRequest) returns (DNSSecuritySync);
+
+  // StreamDNSSecurity pushes a fresh snapshot whenever policy or feed changes.
+  rpc StreamDNSSecurity(GetDNSSecurityRequest) returns (stream DNSSecuritySync);
+}
