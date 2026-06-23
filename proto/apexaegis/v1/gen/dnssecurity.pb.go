@@ -254,6 +254,106 @@ func (x *GetDNSSecurityRequest) GetSinceRevision() string {
 	return ""
 }
 
+// ResolveDeviceGroupsRequest asks the management plane for the groups of the
+// user bound to a device. The gateway calls this per tunnel session (the
+// Zero-Trust PEP resolving authorization from the PDP) so per-group policy uses
+// fresh, authoritative membership instead of a static token claim.
+type ResolveDeviceGroupsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OrgId         string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	DeviceId      string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"` // the device row id (the agent token's device_id claim)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveDeviceGroupsRequest) Reset() {
+	*x = ResolveDeviceGroupsRequest{}
+	mi := &file_apexaegis_v1_dnssecurity_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveDeviceGroupsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveDeviceGroupsRequest) ProtoMessage() {}
+
+func (x *ResolveDeviceGroupsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_apexaegis_v1_dnssecurity_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveDeviceGroupsRequest.ProtoReflect.Descriptor instead.
+func (*ResolveDeviceGroupsRequest) Descriptor() ([]byte, []int) {
+	return file_apexaegis_v1_dnssecurity_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ResolveDeviceGroupsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveDeviceGroupsRequest) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+type ResolveDeviceGroupsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Groups        []string               `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"` // group display names; empty if the device is unlinked
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveDeviceGroupsResponse) Reset() {
+	*x = ResolveDeviceGroupsResponse{}
+	mi := &file_apexaegis_v1_dnssecurity_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveDeviceGroupsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveDeviceGroupsResponse) ProtoMessage() {}
+
+func (x *ResolveDeviceGroupsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_apexaegis_v1_dnssecurity_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveDeviceGroupsResponse.ProtoReflect.Descriptor instead.
+func (*ResolveDeviceGroupsResponse) Descriptor() ([]byte, []int) {
+	return file_apexaegis_v1_dnssecurity_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ResolveDeviceGroupsResponse) GetGroups() []string {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
 var File_apexaegis_v1_dnssecurity_proto protoreflect.FileDescriptor
 
 const file_apexaegis_v1_dnssecurity_proto_rawDesc = "" +
@@ -280,10 +380,16 @@ const file_apexaegis_v1_dnssecurity_proto_rawDesc = "" +
 	"\x15GetDNSSecurityRequest\x12\x1d\n" +
 	"\n" +
 	"gateway_id\x18\x01 \x01(\tR\tgatewayId\x12%\n" +
-	"\x0esince_revision\x18\x02 \x01(\tR\rsinceRevision2\xc5\x01\n" +
+	"\x0esince_revision\x18\x02 \x01(\tR\rsinceRevision\"P\n" +
+	"\x1aResolveDeviceGroupsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\tR\bdeviceId\"5\n" +
+	"\x1bResolveDeviceGroupsResponse\x12\x16\n" +
+	"\x06groups\x18\x01 \x03(\tR\x06groups2\xb1\x02\n" +
 	"\x12DNSSecurityService\x12T\n" +
 	"\x0eGetDNSSecurity\x12#.apexaegis.v1.GetDNSSecurityRequest\x1a\x1d.apexaegis.v1.DNSSecuritySync\x12Y\n" +
-	"\x11StreamDNSSecurity\x12#.apexaegis.v1.GetDNSSecurityRequest\x1a\x1d.apexaegis.v1.DNSSecuritySync0\x01B9Z7github.com/apexaegis/proto/apexaegis/v1/gen;apexaegisv1b\x06proto3"
+	"\x11StreamDNSSecurity\x12#.apexaegis.v1.GetDNSSecurityRequest\x1a\x1d.apexaegis.v1.DNSSecuritySync0\x01\x12j\n" +
+	"\x13ResolveDeviceGroups\x12(.apexaegis.v1.ResolveDeviceGroupsRequest\x1a).apexaegis.v1.ResolveDeviceGroupsResponseB9Z7github.com/apexaegis/proto/apexaegis/v1/gen;apexaegisv1b\x06proto3"
 
 var (
 	file_apexaegis_v1_dnssecurity_proto_rawDescOnce sync.Once
@@ -297,24 +403,28 @@ func file_apexaegis_v1_dnssecurity_proto_rawDescGZIP() []byte {
 	return file_apexaegis_v1_dnssecurity_proto_rawDescData
 }
 
-var file_apexaegis_v1_dnssecurity_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_apexaegis_v1_dnssecurity_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_apexaegis_v1_dnssecurity_proto_goTypes = []any{
-	(*DNSSecurityPolicy)(nil),     // 0: apexaegis.v1.DNSSecurityPolicy
-	(*ThreatDomain)(nil),          // 1: apexaegis.v1.ThreatDomain
-	(*DNSSecuritySync)(nil),       // 2: apexaegis.v1.DNSSecuritySync
-	(*GetDNSSecurityRequest)(nil), // 3: apexaegis.v1.GetDNSSecurityRequest
-	nil,                           // 4: apexaegis.v1.DNSSecurityPolicy.CategoriesEntry
+	(*DNSSecurityPolicy)(nil),           // 0: apexaegis.v1.DNSSecurityPolicy
+	(*ThreatDomain)(nil),                // 1: apexaegis.v1.ThreatDomain
+	(*DNSSecuritySync)(nil),             // 2: apexaegis.v1.DNSSecuritySync
+	(*GetDNSSecurityRequest)(nil),       // 3: apexaegis.v1.GetDNSSecurityRequest
+	(*ResolveDeviceGroupsRequest)(nil),  // 4: apexaegis.v1.ResolveDeviceGroupsRequest
+	(*ResolveDeviceGroupsResponse)(nil), // 5: apexaegis.v1.ResolveDeviceGroupsResponse
+	nil,                                 // 6: apexaegis.v1.DNSSecurityPolicy.CategoriesEntry
 }
 var file_apexaegis_v1_dnssecurity_proto_depIdxs = []int32{
-	4, // 0: apexaegis.v1.DNSSecurityPolicy.categories:type_name -> apexaegis.v1.DNSSecurityPolicy.CategoriesEntry
+	6, // 0: apexaegis.v1.DNSSecurityPolicy.categories:type_name -> apexaegis.v1.DNSSecurityPolicy.CategoriesEntry
 	0, // 1: apexaegis.v1.DNSSecuritySync.policies:type_name -> apexaegis.v1.DNSSecurityPolicy
 	1, // 2: apexaegis.v1.DNSSecuritySync.domains:type_name -> apexaegis.v1.ThreatDomain
 	3, // 3: apexaegis.v1.DNSSecurityService.GetDNSSecurity:input_type -> apexaegis.v1.GetDNSSecurityRequest
 	3, // 4: apexaegis.v1.DNSSecurityService.StreamDNSSecurity:input_type -> apexaegis.v1.GetDNSSecurityRequest
-	2, // 5: apexaegis.v1.DNSSecurityService.GetDNSSecurity:output_type -> apexaegis.v1.DNSSecuritySync
-	2, // 6: apexaegis.v1.DNSSecurityService.StreamDNSSecurity:output_type -> apexaegis.v1.DNSSecuritySync
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
+	4, // 5: apexaegis.v1.DNSSecurityService.ResolveDeviceGroups:input_type -> apexaegis.v1.ResolveDeviceGroupsRequest
+	2, // 6: apexaegis.v1.DNSSecurityService.GetDNSSecurity:output_type -> apexaegis.v1.DNSSecuritySync
+	2, // 7: apexaegis.v1.DNSSecurityService.StreamDNSSecurity:output_type -> apexaegis.v1.DNSSecuritySync
+	5, // 8: apexaegis.v1.DNSSecurityService.ResolveDeviceGroups:output_type -> apexaegis.v1.ResolveDeviceGroupsResponse
+	6, // [6:9] is the sub-list for method output_type
+	3, // [3:6] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name
 	3, // [3:3] is the sub-list for extension extendee
 	0, // [0:3] is the sub-list for field type_name
@@ -331,7 +441,7 @@ func file_apexaegis_v1_dnssecurity_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_apexaegis_v1_dnssecurity_proto_rawDesc), len(file_apexaegis_v1_dnssecurity_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

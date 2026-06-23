@@ -830,6 +830,7 @@ func main() {
 	dnsSecurityServer := &dnssec.Server{
 		Policies: dnssec.StorePolicySource{Store: clientConfigStore},
 		Feed:     dnsFeedStore,
+		Devices:  deviceStore,
 	}
 
 	// gRPC server

@@ -39,6 +39,19 @@ message GetDNSSecurityRequest {
   string since_revision = 2; // empty requests a full snapshot
 }
 
+// ResolveDeviceGroupsRequest asks the management plane for the groups of the
+// user bound to a device. The gateway calls this per tunnel session (the
+// Zero-Trust PEP resolving authorization from the PDP) so per-group policy uses
+// fresh, authoritative membership instead of a static token claim.
+message ResolveDeviceGroupsRequest {
+  string org_id = 1;
+  string device_id = 2; // the device row id (the agent token's device_id claim)
+}
+
+message ResolveDeviceGroupsResponse {
+  repeated string groups = 1; // group display names; empty if the device is unlinked
+}
+
 // DNSSecurityService delivers DNS security policy + feed to gateways.
 service DNSSecurityService {
   // GetDNSSecurity returns the current snapshot, or an empty revision-only
@@ -47,4 +60,8 @@ service DNSSecurityService {
 
   // StreamDNSSecurity pushes a fresh snapshot whenever policy or feed changes.
   rpc StreamDNSSecurity(GetDNSSecurityRequest) returns (stream DNSSecuritySync);
+
+  // ResolveDeviceGroups returns the groups of the user bound to a device, so the
+  // gateway can authorize per-group policy per session without trusting a token.
+  rpc ResolveDeviceGroups(ResolveDeviceGroupsRequest) returns (ResolveDeviceGroupsResponse);
 }

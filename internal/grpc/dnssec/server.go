@@ -37,11 +37,18 @@ type FeedSource interface {
 	Snapshot(ctx context.Context) (domains map[string][]string, revision string, err error)
 }
 
+// DeviceGroupSource resolves the groups of the user bound to a device. It's the
+// authoritative membership lookup the gateway calls per session (ZTNA PEP→PDP).
+type DeviceGroupSource interface {
+	GroupNamesForDevice(ctx context.Context, deviceRowID string) ([]string, error)
+}
+
 // Server implements apexaegisv1.DNSSecurityServiceServer.
 type Server struct {
 	apexaegisv1.UnimplementedDNSSecurityServiceServer
 	Policies PolicySource
 	Feed     FeedSource
+	Devices  DeviceGroupSource // optional; nil => ResolveDeviceGroups returns empty
 }
 
 // GetDNSSecurity returns the current snapshot. When the caller's since_revision
@@ -64,6 +71,21 @@ func (s *Server) GetDNSSecurity(ctx context.Context, req *apexaegisv1.GetDNSSecu
 		return &apexaegisv1.DNSSecuritySync{Revision: revision}, nil
 	}
 	return BuildSync(policies, domains, revision), nil
+}
+
+// ResolveDeviceGroups returns the groups of the user currently bound to the
+// device. The gateway calls this per tunnel session so per-group policy uses
+// fresh, authoritative membership rather than a static token claim. Returns an
+// empty list (not an error) when the device isn't linked to a user yet.
+func (s *Server) ResolveDeviceGroups(ctx context.Context, req *apexaegisv1.ResolveDeviceGroupsRequest) (*apexaegisv1.ResolveDeviceGroupsResponse, error) {
+	if s.Devices == nil || req.GetDeviceId() == "" {
+		return &apexaegisv1.ResolveDeviceGroupsResponse{}, nil
+	}
+	groups, err := s.Devices.GroupNamesForDevice(ctx, req.GetDeviceId())
+	if err != nil {
+		return nil, err
+	}
+	return &apexaegisv1.ResolveDeviceGroupsResponse{Groups: groups}, nil
 }
 
 // BuildSync assembles a DNSSecuritySync payload. It is pure and order-stable for

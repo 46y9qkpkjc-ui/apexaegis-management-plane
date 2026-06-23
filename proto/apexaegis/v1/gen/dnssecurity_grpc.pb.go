@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	DNSSecurityService_GetDNSSecurity_FullMethodName    = "/apexaegis.v1.DNSSecurityService/GetDNSSecurity"
-	DNSSecurityService_StreamDNSSecurity_FullMethodName = "/apexaegis.v1.DNSSecurityService/StreamDNSSecurity"
+	DNSSecurityService_GetDNSSecurity_FullMethodName      = "/apexaegis.v1.DNSSecurityService/GetDNSSecurity"
+	DNSSecurityService_StreamDNSSecurity_FullMethodName   = "/apexaegis.v1.DNSSecurityService/StreamDNSSecurity"
+	DNSSecurityService_ResolveDeviceGroups_FullMethodName = "/apexaegis.v1.DNSSecurityService/ResolveDeviceGroups"
 )
 
 // DNSSecurityServiceClient is the client API for DNSSecurityService service.
@@ -34,6 +35,9 @@ type DNSSecurityServiceClient interface {
 	GetDNSSecurity(ctx context.Context, in *GetDNSSecurityRequest, opts ...grpc.CallOption) (*DNSSecuritySync, error)
 	// StreamDNSSecurity pushes a fresh snapshot whenever policy or feed changes.
 	StreamDNSSecurity(ctx context.Context, in *GetDNSSecurityRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DNSSecuritySync], error)
+	// ResolveDeviceGroups returns the groups of the user bound to a device, so the
+	// gateway can authorize per-group policy per session without trusting a token.
+	ResolveDeviceGroups(ctx context.Context, in *ResolveDeviceGroupsRequest, opts ...grpc.CallOption) (*ResolveDeviceGroupsResponse, error)
 }
 
 type dNSSecurityServiceClient struct {
@@ -73,6 +77,16 @@ func (c *dNSSecurityServiceClient) StreamDNSSecurity(ctx context.Context, in *Ge
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type DNSSecurityService_StreamDNSSecurityClient = grpc.ServerStreamingClient[DNSSecuritySync]
 
+func (c *dNSSecurityServiceClient) ResolveDeviceGroups(ctx context.Context, in *ResolveDeviceGroupsRequest, opts ...grpc.CallOption) (*ResolveDeviceGroupsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveDeviceGroupsResponse)
+	err := c.cc.Invoke(ctx, DNSSecurityService_ResolveDeviceGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DNSSecurityServiceServer is the server API for DNSSecurityService service.
 // All implementations must embed UnimplementedDNSSecurityServiceServer
 // for forward compatibility.
@@ -84,6 +98,9 @@ type DNSSecurityServiceServer interface {
 	GetDNSSecurity(context.Context, *GetDNSSecurityRequest) (*DNSSecuritySync, error)
 	// StreamDNSSecurity pushes a fresh snapshot whenever policy or feed changes.
 	StreamDNSSecurity(*GetDNSSecurityRequest, grpc.ServerStreamingServer[DNSSecuritySync]) error
+	// ResolveDeviceGroups returns the groups of the user bound to a device, so the
+	// gateway can authorize per-group policy per session without trusting a token.
+	ResolveDeviceGroups(context.Context, *ResolveDeviceGroupsRequest) (*ResolveDeviceGroupsResponse, error)
 	mustEmbedUnimplementedDNSSecurityServiceServer()
 }
 
@@ -99,6 +116,9 @@ func (UnimplementedDNSSecurityServiceServer) GetDNSSecurity(context.Context, *Ge
 }
 func (UnimplementedDNSSecurityServiceServer) StreamDNSSecurity(*GetDNSSecurityRequest, grpc.ServerStreamingServer[DNSSecuritySync]) error {
 	return status.Error(codes.Unimplemented, "method StreamDNSSecurity not implemented")
+}
+func (UnimplementedDNSSecurityServiceServer) ResolveDeviceGroups(context.Context, *ResolveDeviceGroupsRequest) (*ResolveDeviceGroupsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveDeviceGroups not implemented")
 }
 func (UnimplementedDNSSecurityServiceServer) mustEmbedUnimplementedDNSSecurityServiceServer() {}
 func (UnimplementedDNSSecurityServiceServer) testEmbeddedByValue()                            {}
@@ -150,6 +170,24 @@ func _DNSSecurityService_StreamDNSSecurity_Handler(srv interface{}, stream grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type DNSSecurityService_StreamDNSSecurityServer = grpc.ServerStreamingServer[DNSSecuritySync]
 
+func _DNSSecurityService_ResolveDeviceGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveDeviceGroupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DNSSecurityServiceServer).ResolveDeviceGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DNSSecurityService_ResolveDeviceGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DNSSecurityServiceServer).ResolveDeviceGroups(ctx, req.(*ResolveDeviceGroupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DNSSecurityService_ServiceDesc is the grpc.ServiceDesc for DNSSecurityService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -160,6 +198,10 @@ var DNSSecurityService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDNSSecurity",
 			Handler:    _DNSSecurityService_GetDNSSecurity_Handler,
+		},
+		{
+			MethodName: "ResolveDeviceGroups",
+			Handler:    _DNSSecurityService_ResolveDeviceGroups_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
