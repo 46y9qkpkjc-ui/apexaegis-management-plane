@@ -40,9 +40,17 @@ type Store interface {
 	Upsert(ctx context.Context, gw *GatewayNode) error
 	UpdateHeartbeat(ctx context.Context, id string, policyVersion int64) error
 	MarkOffline(ctx context.Context, olderThan time.Duration) error
+	DeleteStale(ctx context.Context, olderThan time.Duration) error
 	MarkMTLSIssued(ctx context.Context, id string, notAfter time.Time) error
 	LoadAll(ctx context.Context) ([]*GatewayNode, error)
 }
+
+// Heartbeat thresholds: a gateway goes offline after offlineAfter of silence,
+// and is removed entirely (in-memory + DB) after staleRemoveAfter.
+const (
+	offlineAfter     = 5 * time.Minute
+	staleRemoveAfter = 120 * time.Minute
+)
 
 // Registry manages all known gateway nodes with in-memory cache + DB persistence.
 type Registry struct {
@@ -230,11 +238,20 @@ func (r *Registry) StartCleanupLoop(ctx context.Context) {
 		case <-ticker.C:
 			r.mu.Lock()
 			for id, gw := range r.gateways {
-				if time.Since(gw.LastHeartbeat) > 5*time.Minute && gw.Status != "offline" {
+				since := time.Since(gw.LastHeartbeat)
+				switch {
+				case since > staleRemoveAfter:
+					// No heartbeat for > 120m — remove the gateway entirely.
+					delete(r.gateways, id)
+					r.logger.Warn("Gateway removed (stale, no heartbeat)",
+						zap.String("id", id),
+						zap.Duration("since", since),
+					)
+				case since > offlineAfter && gw.Status != "offline":
 					gw.Status = "offline"
 					r.logger.Warn("Gateway marked offline (no heartbeat)",
 						zap.String("id", id),
-						zap.Duration("since", time.Since(gw.LastHeartbeat)),
+						zap.Duration("since", since),
 					)
 				}
 			}
@@ -242,8 +259,11 @@ func (r *Registry) StartCleanupLoop(ctx context.Context) {
 
 			if r.store != nil {
 				dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				if err := r.store.MarkOffline(dbCtx, 5*time.Minute); err != nil {
+				if err := r.store.MarkOffline(dbCtx, offlineAfter); err != nil {
 					r.logger.Debug("Failed to mark stale gateways offline in DB", zap.Error(err))
+				}
+				if err := r.store.DeleteStale(dbCtx, staleRemoveAfter); err != nil {
+					r.logger.Debug("Failed to delete stale gateways in DB", zap.Error(err))
 				}
 				cancel()
 			}

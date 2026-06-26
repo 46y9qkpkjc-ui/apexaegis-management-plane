@@ -84,6 +84,16 @@ func (s *GatewayStore) MarkOffline(ctx context.Context, olderThan time.Duration)
 	return err
 }
 
+// DeleteStale removes gateways whose last heartbeat is older than the cutoff
+// (a gateway that has been silent this long is treated as decommissioned).
+func (s *GatewayStore) DeleteStale(ctx context.Context, olderThan time.Duration) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM system_mgmt.gateway_nodes WHERE last_heartbeat < $1`,
+		time.Now().Add(-olderThan),
+	)
+	return err
+}
+
 // MarkMTLSIssued records mTLS certificate issuance.
 func (s *GatewayStore) MarkMTLSIssued(ctx context.Context, id string, notAfter time.Time) error {
 	_, err := s.db.ExecContext(ctx,
