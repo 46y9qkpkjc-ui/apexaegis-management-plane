@@ -29,6 +29,7 @@ import (
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dot1x"
 	"github.com/zcp/management-plane/internal/gateway"
+	"github.com/zcp/management-plane/internal/grant"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
@@ -114,6 +115,24 @@ func main() {
 	profileStore := db.NewProfileStore(dbConn)
 	deviceStore := db.NewDeviceStore(dbConn, logger)
 	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
+
+	// ── Device-grant issuer (machine-tunnel DC-scope grants) ──
+	// Mints the private-access grant the gateway verifies; uses the SAME shared
+	// signing key the gateways verify with. Optional — disabled if the key is unset.
+	var deviceGrantHandler *handlers.DeviceGrantHandler
+	if grantKey := os.Getenv("PRIVATE_ACCESS_GRANT_SIGNING_KEY"); grantKey != "" {
+		grantIssuer, gErr := grant.NewIssuer(grantKey, grant.WithIssuer(envOrDefault("DEVICE_API_DOMAIN", grant.DefaultIssuer)))
+		if gErr != nil {
+			logger.Warn("device-grant issuance disabled: invalid PRIVATE_ACCESS_GRANT_SIGNING_KEY", zap.Error(gErr))
+		} else if dcSegments, sErr := handlers.NewConfigDCSegments(os.Getenv("DEVICE_GRANT_DC_SEGMENTS")); sErr != nil {
+			logger.Warn("device-grant issuance disabled: invalid DEVICE_GRANT_DC_SEGMENTS", zap.Error(sErr))
+		} else {
+			deviceGrantHandler = handlers.NewDeviceGrantHandler(deviceStore, grantIssuer, dcSegments, logger)
+			logger.Info("device-grant issuance enabled (machine-tunnel DC-scope grants)")
+		}
+	} else {
+		logger.Info("device-grant issuance disabled (set PRIVATE_ACCESS_GRANT_SIGNING_KEY to enable)")
+	}
 
 	// ── Gateway registry persistence ──
 	gwStore := db.NewGatewayStore(dbConn)
@@ -452,6 +471,10 @@ func main() {
 		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
 		deviceClientAPI.POST("/posture", clientRuntimeHandler.ReportPosture)
 		deviceClientAPI.POST("/logs", clientRuntimeHandler.ReportLogs)
+		// Machine-tunnel DC-scope grant (pre-logon device tunnel; no user).
+		if deviceGrantHandler != nil {
+			deviceClientAPI.POST("/dc-grant", deviceGrantHandler.IssueDCGrant)
+		}
 	}
 
 	// Device-authenticated legacy agent policy endpoint.
