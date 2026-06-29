@@ -86,6 +86,24 @@ variable "vault_passphrase" {
   sensitive   = true
 }
 
+variable "grant_signing_key" {
+  description = "HMAC key the MP signs device/user access grants with. MUST equal the private-access gateway's grant_signing_key. Pass via TF_VAR or the gitignored tfvars; never commit."
+  type        = string
+  sensitive   = true
+}
+
+variable "device_grant_dc_segments" {
+  description = "JSON map of DC segments a machine tunnel may reach pre-logon: {\"*\":{\"host\":\"<DC IP>\",\"ports\":[...]}}."
+  type        = string
+  default     = "{\"*\":{\"host\":\"10.10.1.4\",\"ports\":[53,88,389,445,464,123]}}"
+}
+
+variable "device_grant_prelogon_gateway" {
+  description = "host:port of the private-access gateway the agent dials before user logon."
+  type        = string
+  default     = "ad-gw.apexaegis.app:443"
+}
+
 variable "image_tag" {
   default = "latest"
 }
@@ -578,6 +596,10 @@ resource "aws_ecs_task_definition" "mgmt" {
       { name = "DEVICE_CERTIFICATE_AUTHORITY_ARN", value = var.device_certificate_authority_arn },
       { name = "DEVICE_CERTIFICATE_TEMPLATE_ARN", value = var.device_certificate_template_arn },
       { name = "DEVICE_CERTIFICATE_SIGNING_ALGORITHM", value = var.device_certificate_signing_algorithm },
+      # Pre-logon device grant: which DC host/ports a machine tunnel may reach,
+      # and the gateway the agent dials before user logon. Non-secret config.
+      { name = "DEVICE_GRANT_DC_SEGMENTS", value = var.device_grant_dc_segments },
+      { name = "DEVICE_GRANT_PRELOGON_GATEWAY", value = var.device_grant_prelogon_gateway },
     ]
 
     secrets = [
@@ -592,6 +614,12 @@ resource "aws_ecs_task_definition" "mgmt" {
       {
         name      = "VAULT_PASSPHRASE"
         valueFrom = aws_ssm_parameter.vault_passphrase.arn
+      },
+      {
+        # HMAC key the MP signs device/user grants with; the private-access
+        # gateway verifies grants with the SAME value (its grant_signing_key).
+        name      = "PRIVATE_ACCESS_GRANT_SIGNING_KEY"
+        valueFrom = aws_ssm_parameter.grant_signing_key.arn
       },
     ]
 
@@ -642,6 +670,16 @@ resource "aws_ssm_parameter" "vault_passphrase" {
   tags      = { Project = "apexaegis" }
 }
 
+# HMAC key for signing device/user access grants. MUST match the private-access
+# gateway's grant_signing_key (it verifies grants with the same value).
+resource "aws_ssm_parameter" "grant_signing_key" {
+  name      = "/apexaegis/mgmt-plane/grant-signing-key"
+  type      = "SecureString"
+  value     = var.grant_signing_key
+  overwrite = true
+  tags      = { Project = "apexaegis" }
+}
+
 # IAM policy to read SSM parameters
 resource "aws_iam_policy" "ssm_read" {
   name = "apexaegis-mgmt-ssm-read"
@@ -655,6 +693,7 @@ resource "aws_iam_policy" "ssm_read" {
         aws_ssm_parameter.database_url.arn,
         aws_ssm_parameter.jwt_secret.arn,
         aws_ssm_parameter.vault_passphrase.arn,
+        aws_ssm_parameter.grant_signing_key.arn,
       ]
       }, {
       Effect   = "Allow"
