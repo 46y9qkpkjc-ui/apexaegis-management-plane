@@ -31,17 +31,17 @@ type PortalArtifact struct {
 type PortalHandler struct {
 	scim    *db.SCIMStore
 	devices *db.DeviceStore
-	pca     *security.AWSPrivateCA
+	pca     security.DeviceCertificateIssuer
 	logger  *zap.Logger
 }
 
-func NewPortalHandler(scim *db.SCIMStore, devices *db.DeviceStore, pca *security.AWSPrivateCA, logger *zap.Logger) *PortalHandler {
+func NewPortalHandler(scim *db.SCIMStore, devices *db.DeviceStore, pca security.DeviceCertificateIssuer, logger *zap.Logger) *PortalHandler {
 	return &PortalHandler{scim: scim, devices: devices, pca: pca, logger: logger}
 }
 
 func (h *PortalHandler) IssueDeviceCertificate(c *gin.Context) {
 	if h.pca == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AWS Private CA device enrollment is not configured"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "device certificate enrollment is not configured"})
 		return
 	}
 	var req struct {
@@ -63,7 +63,7 @@ func (h *PortalHandler) IssueDeviceCertificate(c *gin.Context) {
 		req.ValidDays,
 	)
 	if err != nil {
-		h.logger.Error("AWS Private CA device certificate issuance failed",
+		h.logger.Error("device certificate issuance failed",
 			zap.String("org_id", c.GetString("org_id")),
 			zap.String("device_id", req.DeviceID),
 			zap.Error(err),

@@ -149,12 +149,17 @@ func main() {
 	}
 	authStore := db.NewAuthStore(dbConn, []byte(jwtSecret), logger)
 
-	var devicePCA *security.AWSPrivateCA
-	if pca, pcaErr := security.NewAWSPrivateCA(ctx); pcaErr != nil {
-		logger.Warn("AWS Private CA device enrollment disabled", zap.Error(pcaErr))
+	// Device-cert issuer: prefer the device step-ca; fall back to legacy ACM PCA.
+	var deviceCA security.DeviceCertificateIssuer
+	if stepca, scErr := security.NewStepCADeviceCA(ctx); scErr == nil {
+		deviceCA = stepca
+		logger.Info("device enrollment: device step-ca enabled")
+	} else if pca, pcaErr := security.NewAWSPrivateCA(ctx); pcaErr == nil {
+		deviceCA = pca
+		logger.Info("device enrollment: AWS Private CA (legacy) enabled")
 	} else {
-		devicePCA = pca
-		logger.Info("AWS Private CA device enrollment enabled")
+		logger.Warn("device enrollment disabled",
+			zap.NamedError("stepca", scErr), zap.NamedError("acmpca", pcaErr))
 	}
 
 	// ── SCIM store (admin + client user provisioning) ──
@@ -298,7 +303,7 @@ func main() {
 	portalAPI.Use(middleware.JWTAuth(authStore))
 	portalAPI.Use(middleware.RequireRole("client_user"))
 	{
-		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, devicePCA, logger)
+		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, deviceCA, logger)
 		portalAPI.GET("/profile", portalHandler.Profile)
 		portalAPI.GET("/artifacts", portalHandler.Artifacts)
 		portalAPI.POST("/devices/certificates", portalHandler.IssueDeviceCertificate)
