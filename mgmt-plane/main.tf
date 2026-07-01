@@ -92,6 +92,25 @@ variable "grant_signing_key" {
   sensitive   = true
 }
 
+# ── Device-cert issuance via the device step-ca (replaces ACM PCA) ──────────
+variable "device_stepca_url" {
+  description = "Device step-ca base URL. When set, the MP signs portal device CSRs here instead of ACM PCA."
+  type        = string
+  default     = "https://device-ca.apexaegis.app"
+}
+
+variable "device_stepca_fingerprint" {
+  description = "Device step-ca root SHA-256 fingerprint (pins trust + sets the OTT sha claim)."
+  type        = string
+  default     = "45f3ec7bd27027c06d30f9e0dcdd7a69687c1f5347cb82e4597d0aa7a1c2ff50"
+}
+
+variable "device_stepca_provisioner" {
+  description = "JWK provisioner on the device step-ca the MP mints OTTs with."
+  type        = string
+  default     = "portal"
+}
+
 variable "device_grant_dc_segments" {
   description = "JSON map of DC segments a machine tunnel may reach pre-logon: {\"*\":{\"host\":\"<DC IP>\",\"ports\":[...]}}."
   type        = string
@@ -600,6 +619,11 @@ resource "aws_ecs_task_definition" "mgmt" {
       # and the gateway the agent dials before user logon. Non-secret config.
       { name = "DEVICE_GRANT_DC_SEGMENTS", value = var.device_grant_dc_segments },
       { name = "DEVICE_GRANT_PRELOGON_GATEWAY", value = var.device_grant_prelogon_gateway },
+      # Device-cert issuance via the device step-ca (replaces ACM PCA): when set,
+      # the MP signs portal device CSRs through device-ca.apexaegis.app.
+      { name = "DEVICE_STEPCA_URL", value = var.device_stepca_url },
+      { name = "DEVICE_STEPCA_FINGERPRINT", value = var.device_stepca_fingerprint },
+      { name = "DEVICE_STEPCA_PROVISIONER", value = var.device_stepca_provisioner },
     ]
 
     secrets = [
@@ -620,6 +644,12 @@ resource "aws_ecs_task_definition" "mgmt" {
         # gateway verifies grants with the SAME value (its grant_signing_key).
         name      = "PRIVATE_ACCESS_GRANT_SIGNING_KEY"
         valueFrom = aws_ssm_parameter.grant_signing_key.arn
+      },
+      {
+        # device step-ca "portal" provisioner password (SSM, created out-of-band) —
+        # decrypts the provisioner key so the MP can mint OTTs to sign device CSRs.
+        name      = "PORTAL_DEVICE_JWK_PASSWORD"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/portal-device-jwk-password"
       },
     ]
 
@@ -694,6 +724,7 @@ resource "aws_iam_policy" "ssm_read" {
         aws_ssm_parameter.jwt_secret.arn,
         aws_ssm_parameter.vault_passphrase.arn,
         aws_ssm_parameter.grant_signing_key.arn,
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/portal-device-jwk-password",
       ]
       }, {
       Effect   = "Allow"
