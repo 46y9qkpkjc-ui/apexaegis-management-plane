@@ -309,6 +309,16 @@ func main() {
 		portalAPI.POST("/devices/certificates", portalHandler.IssueDeviceCertificate)
 	}
 
+	// AD-sync connector API (outbound-only; Infra-CA mTLS enforced in the handler
+	// via the dedicated connector listener — no JWT).
+	connectorAPI := router.Group("/api/v1/connector")
+	{
+		connectorStore := db.NewConnectorStore(dbConn, logger)
+		connectorHandler := handlers.NewConnectorHandler(connectorStore, logger)
+		connectorAPI.GET("/config", connectorHandler.GetConfig)
+		connectorAPI.POST("/sync", connectorHandler.PostSync)
+	}
+
 	// User Management API (admin-only)
 	userAPI := router.Group("/api/v1/users")
 	userAPI.Use(middleware.JWTAuth(authStore))
