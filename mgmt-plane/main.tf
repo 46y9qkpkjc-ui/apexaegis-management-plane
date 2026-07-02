@@ -11,11 +11,21 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
   }
 }
 
 provider "aws" {
   region = var.aws_region
+}
+
+# Cloudflare token supplied via TF_VAR_cloudflare_api_token — never commit it.
+# Used only for the connector-api DNS + ACM validation records (connector.tf).
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
 }
 
 # ── Variables ──────────────────────────────────────────────────────────────
@@ -147,6 +157,36 @@ variable "gateway_trust_store_arn" {
 variable "device_trust_store_arn" {
   description = "ALB trust store ARN for desktop/mobile device certificates."
   type        = string
+}
+
+variable "connector_trust_store_arn" {
+  description = "ALB trust store (Infra CA) for the AD-sync connector mTLS listener — gateway/terraform/step-ca-trust output connector_trust_store_arn."
+  type        = string
+  default     = "arn:aws:elasticloadbalancing:ap-southeast-1:184353710603:truststore/apexaegis-connector-stepca-trust/c198b8f7237f3bea"
+}
+
+variable "connector_domain" {
+  description = "Public hostname for the AD-sync connector mTLS ALB (dedicated 443 listener, Infra-CA trust store)."
+  type        = string
+  default     = "connector-api.apexaegis.app"
+}
+
+variable "cloudflare_zone_name" {
+  description = "Cloudflare zone for connector-api DNS + ACM validation records."
+  type        = string
+  default     = "apexaegis.app"
+}
+
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token (Zone:DNS:Edit). Supply via the gitignored terraform.tfvars or TF_VAR_cloudflare_api_token — never commit."
+  type        = string
+  sensitive   = true
+}
+
+variable "dns_ttl" {
+  description = "TTL for the connector-api Cloudflare records."
+  type        = number
+  default     = 60
 }
 
 variable "device_certificate_authority_arn" {
@@ -772,6 +812,12 @@ resource "aws_ecs_service" "mgmt" {
     container_port   = 443
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.connector.arn
+    container_name   = "management-plane"
+    container_port   = 443
+  }
+
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -781,6 +827,7 @@ resource "aws_ecs_service" "mgmt" {
     aws_lb_listener.https,
     aws_lb_listener.device_rest_mtls,
     aws_lb_listener.gateway_grpc_mtls,
+    aws_lb_listener.connector_mtls,
     aws_iam_role_policy_attachment.ecs_task_execution,
   ]
 

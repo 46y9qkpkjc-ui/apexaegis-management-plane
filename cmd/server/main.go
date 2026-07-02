@@ -562,6 +562,13 @@ func main() {
 		// IdP Test Connection (validate IdP connectivity before saving)
 		idpTestHandler := handlers.NewIdPTestHandler(idpStore, idpLogStore, idBroker, logger)
 		adminAPI.POST("/idp/:id/test", idpTestHandler.TestConnection)
+
+		// AD-sync connector — web-ui-managed LDAP config + synced directory
+		connectorAdminHandler := handlers.NewConnectorAdminHandler(db.NewConnectorStore(dbConn, logger), logger)
+		adminAPI.GET("/connectors/:connector_id/config", connectorAdminHandler.GetConnectorConfig)
+		adminAPI.PUT("/connectors/:connector_id/config", connectorAdminHandler.UpdateConnectorConfig)
+		adminAPI.GET("/connectors/:connector_id/users", connectorAdminHandler.ListConnectorUsers)
+		adminAPI.GET("/connectors/:connector_id/groups", connectorAdminHandler.ListConnectorGroups)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
