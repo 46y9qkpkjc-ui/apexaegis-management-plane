@@ -20,11 +20,13 @@ import (
 // connector process itself over Infra-CA mTLS.
 type ConnectorAdminHandler struct {
 	store  *db.ConnectorStore
+	dir    *db.DirectoryStore
+	orgID  string
 	logger *zap.Logger
 }
 
-func NewConnectorAdminHandler(store *db.ConnectorStore, logger *zap.Logger) *ConnectorAdminHandler {
-	return &ConnectorAdminHandler{store: store, logger: logger}
+func NewConnectorAdminHandler(store *db.ConnectorStore, dir *db.DirectoryStore, orgID string, logger *zap.Logger) *ConnectorAdminHandler {
+	return &ConnectorAdminHandler{store: store, dir: dir, orgID: orgID, logger: logger}
 }
 
 // adminConnectorConfig is the admin-facing config shape (adds connector_id + sync status).
@@ -129,6 +131,35 @@ func (h *ConnectorAdminHandler) ListConnectorGroups(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"groups": groups, "total": total})
+}
+
+// SetGroupSyncEnabled — PATCH /api/v1/admin/connectors/:connector_id/groups/:sid/sync
+// toggles whether a group is allowed to flow into the system, then re-bridges so
+// the change (add/remove the native policy group) takes effect immediately.
+func (h *ConnectorAdminHandler) SetGroupSyncEnabled(c *gin.Context) {
+	id := c.Param("connector_id")
+	sid := c.Param("sid")
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "enabled (bool) is required"})
+		return
+	}
+	if err := h.store.SetGroupSyncEnabled(c.Request.Context(), id, sid, req.Enabled); err != nil {
+		h.logger.Error("set group sync_enabled", zap.String("connector_id", id), zap.String("sid", sid), zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "group not found"})
+		return
+	}
+	var bridge *db.BridgeResult
+	if h.dir != nil {
+		if b, bErr := h.dir.BridgeGroups(c.Request.Context(), id, h.orgID); bErr != nil {
+			h.logger.Warn("re-bridge after toggle", zap.Error(bErr))
+		} else {
+			bridge = b
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"sid": sid, "sync_enabled": req.Enabled, "bridge": bridge})
 }
 
 func toAdminConfig(id string, c *db.ConnectorConfig, users, groups int, last sql.NullTime) adminConnectorConfig {

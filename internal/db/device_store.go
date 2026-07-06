@@ -474,6 +474,31 @@ func (s *DeviceStore) LinkClientUser(ctx context.Context, orgID, deviceRowID, cl
 	return nil
 }
 
+// LinkDemoDevicesByName links seeded demo devices (device_id LIKE 'demo-dev-%')
+// to the client_user whose name starts with the device_name prefix, e.g.
+// ANDERSON-TP14 → "Anderson Ng". Idempotent (only fills unlinked devices); used by
+// the assistant's SeedDemo so posture lookups resolve a user to their device.
+func (s *DeviceStore) LinkDemoDevicesByName(ctx context.Context, orgID string) (int64, error) {
+	if orgID == "" {
+		return 0, errors.New("orgID is required")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE system_mgmt.devices AS d
+		   SET client_user_id = cu.id, updated_at = now()
+		  FROM system_mgmt.client_users cu
+		 WHERE d.org_id = $1
+		   AND d.device_id LIKE 'demo-dev-%'
+		   AND d.client_user_id IS NULL
+		   AND cu.org_id = $1
+		   AND lower(cu.name) LIKE lower(split_part(d.device_name, '-', 1)) || '%'
+	`, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("link demo devices: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // RefreshLicenseConsumption recomputes consumed licenses from active mTLS devices.
 func (s *DeviceStore) RefreshLicenseConsumption(ctx context.Context, orgID string) error {
 	_, err := s.db.ExecContext(ctx, `

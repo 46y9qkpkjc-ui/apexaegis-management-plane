@@ -43,8 +43,9 @@ type SCIMGroup struct {
 	DisplayName string     `json:"display_name"`
 	ExternalID  string     `json:"external_id,omitempty"`
 	IdPID       string     `json:"idp_id,omitempty"`
-	Source      string     `json:"source"`
-	Members     []string   `json:"members,omitempty"` // user IDs
+	Source        string   `json:"source"`
+	ImportEnabled bool     `json:"import_enabled"` // ldap groups: provision users when true
+	Members       []string `json:"members,omitempty"`
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 }
@@ -789,7 +790,7 @@ func (s *SCIMStore) ListGroupsForOrg(ctx context.Context, orgID, filter string, 
 
 	query := fmt.Sprintf(`
 		SELECT id, org_id, display_name, COALESCE(external_id, ''),
-		       COALESCE(idp_id, ''), source, created_at, updated_at
+		       COALESCE(idp_id, ''), source, COALESCE(import_enabled, false), created_at, updated_at
 		  FROM system_mgmt.groups
 		  %s
 		 ORDER BY created_at DESC
@@ -805,7 +806,7 @@ func (s *SCIMStore) ListGroupsForOrg(ctx context.Context, orgID, filter string, 
 	for rows.Next() {
 		var g SCIMGroup
 		if err := rows.Scan(&g.ID, &g.OrgID, &g.DisplayName, &g.ExternalID,
-			&g.IdPID, &g.Source, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			&g.IdPID, &g.Source, &g.ImportEnabled, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scan tenant group: %w", err)
 		}
 		g.Members, err = s.getGroupMembers(ctx, g.ID)
@@ -815,6 +816,21 @@ func (s *SCIMStore) ListGroupsForOrg(ctx context.Context, orgID, filter string, 
 		groups = append(groups, g)
 	}
 	return groups, total, rows.Err()
+}
+
+// SetGroupImportEnabled toggles whether an imported directory (ldap) group
+// provisions client users. Only applies to source='ldap' groups.
+func (s *SCIMStore) SetGroupImportEnabled(ctx context.Context, orgID, id string, enabled bool) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE system_mgmt.groups SET import_enabled = $3, updated_at = now()
+		WHERE id = $1 AND org_id = $2 AND source = 'ldap'`, id, orgID, enabled)
+	if err != nil {
+		return fmt.Errorf("set import_enabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("group not found or not a directory (ldap) group")
+	}
+	return nil
 }
 
 // UpdateGroupForOrg updates a tenant-scoped local or SCIM group display name.

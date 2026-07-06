@@ -233,3 +233,13 @@ func (h *GatewayHandler) ListAvailableGateways(c *gin.Context) {
 		"gateways": h.registry.ListAvailable(),
 	})
 }
+
+// ListAvailablePrivateGateways handles GET /api/v1/private-gateways/available —
+// the QUIC private-access ingress brokers (e.g. ad-gw). They establish the client
+// micro-tunnel; they are NOT selectable SWG PoPs, so they are served here rather
+// than mixed into /api/v1/gateways/available.
+func (h *GatewayHandler) ListAvailablePrivateGateways(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"gateways": h.registry.ListPrivateAccess(),
+	})
+}

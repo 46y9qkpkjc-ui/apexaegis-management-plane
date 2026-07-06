@@ -68,7 +68,7 @@ func (s *PolicyStore) List() []policy.SecurityPolicy {
 		        web_filter_enabled, web_block_categories, web_allow_categories,
 		        web_custom_blocklist, web_custom_allowlist, web_safe_search, web_block_uncategorized,
 		        cloud_tenant_restrict, cloud_allowed_tenants,
-		        log_traffic, log_security_events
+		        log_traffic, log_security_events, source_device_posture
 		 FROM system_mgmt.policies ORDER BY sequence`)
 	if err != nil {
 		s.logger.Error("list policies", zap.Error(err))
@@ -95,7 +95,7 @@ func (s *PolicyStore) Get(id string) (*policy.SecurityPolicy, bool) {
 		        web_filter_enabled, web_block_categories, web_allow_categories,
 		        web_custom_blocklist, web_custom_allowlist, web_safe_search, web_block_uncategorized,
 		        cloud_tenant_restrict, cloud_allowed_tenants,
-		        log_traffic, log_security_events
+		        log_traffic, log_security_events, source_device_posture
 		 FROM system_mgmt.policies WHERE id = $1`, id)
 
 	p, err := s.scanPolicy(row)
@@ -416,6 +416,9 @@ func (s *PolicyStore) listUnlocked() []policy.SecurityPolicy {
 }
 
 func (s *PolicyStore) upsertPolicy(p *policy.SecurityPolicy) error {
+	if p.SourceDevicePosture == "" {
+		p.SourceDevicePosture = "any"
+	}
 	trafficSteering := toJSON(p.TrafficSteering)
 	accessMethods := toJSON(p.AccessMethods)
 	sourceUsers := toJSON(p.SourceUsers)
@@ -457,10 +460,10 @@ func (s *PolicyStore) upsertPolicy(p *policy.SecurityPolicy) error {
 			web_filter_enabled, web_block_categories, web_allow_categories,
 			web_custom_blocklist, web_custom_allowlist, web_safe_search, web_block_uncategorized,
 			cloud_tenant_restrict, cloud_allowed_tenants,
-			log_traffic, log_security_events
+			log_traffic, log_security_events, source_device_posture
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-			$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42
+			$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43
 		) ON CONFLICT (id) DO UPDATE SET
 			name=$3, sequence=$4, enabled=$5,
 			traffic_steering=$6, access_methods=$7,
@@ -475,7 +478,7 @@ func (s *PolicyStore) upsertPolicy(p *policy.SecurityPolicy) error {
 			web_filter_enabled=$32, web_block_categories=$33, web_allow_categories=$34,
 			web_custom_blocklist=$35, web_custom_allowlist=$36, web_safe_search=$37, web_block_uncategorized=$38,
 			cloud_tenant_restrict=$39, cloud_allowed_tenants=$40,
-			log_traffic=$41, log_security_events=$42`,
+			log_traffic=$41, log_security_events=$42, source_device_posture=$43`,
 		p.ID, p.OrgID, p.Name, p.Sequence, p.Enabled,
 		trafficSteering, accessMethods,
 		sourceUsers, sourceUserGroups, sourceDevices, sourceDeviceGroups,
@@ -489,7 +492,7 @@ func (s *PolicyStore) upsertPolicy(p *policy.SecurityPolicy) error {
 		p.WebFilterEnabled, webBlockCats, webAllowCats,
 		webBlocklist, webAllowlist, p.WebSafeSearch, p.WebBlockUncategorized,
 		p.CloudTenantRestrict, cloudTenants,
-		p.LogTraffic, p.LogSecurityEvents,
+		p.LogTraffic, p.LogSecurityEvents, p.SourceDevicePosture,
 	)
 	return err
 }
@@ -537,7 +540,7 @@ func (s *PolicyStore) scanPolicyRow(rows *sql.Rows) (*policy.SecurityPolicy, err
 		&p.WebFilterEnabled, &webBlockCats, &webAllowCats,
 		&webBlocklist, &webAllowlist, &p.WebSafeSearch, &p.WebBlockUncategorized,
 		&p.CloudTenantRestrict, &cloudTenants,
-		&p.LogTraffic, &p.LogSecurityEvents,
+		&p.LogTraffic, &p.LogSecurityEvents, &p.SourceDevicePosture,
 	)
 	if err != nil {
 		return nil, err
@@ -608,7 +611,7 @@ func (s *PolicyStore) scanPolicy(row *sql.Row) (*policy.SecurityPolicy, error) {
 		&p.WebFilterEnabled, &webBlockCats, &webAllowCats,
 		&webBlocklist, &webAllowlist, &p.WebSafeSearch, &p.WebBlockUncategorized,
 		&p.CloudTenantRestrict, &cloudTenants,
-		&p.LogTraffic, &p.LogSecurityEvents,
+		&p.LogTraffic, &p.LogSecurityEvents, &p.SourceDevicePosture,
 	)
 	if err != nil {
 		return nil, err

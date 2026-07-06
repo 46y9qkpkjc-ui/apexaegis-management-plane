@@ -34,9 +34,12 @@ type DCSegmentResolver interface {
 	Resolve(orgID string) (DCSegment, bool)
 }
 
-// DefaultDCPorts is the standard machine-tunnel service set: DNS, Kerberos,
-// CLDAP/LDAP, SMB, kpasswd, NTP. The gateway forces these TCP-first.
-func DefaultDCPorts() []int { return []int{53, 88, 389, 445, 464, 123} }
+// DefaultDCPorts is the standard machine-tunnel service set for domain-join +
+// Kerberos logon: Kerberos(88), LDAP(389), SMB/SYSVOL(445), kpasswd(464),
+// LDAPS(636), Global Catalog(3268). The gateway forces these TCP-first. DNS(53)
+// is served by the client DNS shim and NTP(123) by the host clock (both out);
+// CLDAP/RPC are intentionally excluded.
+func DefaultDCPorts() []int { return []int{88, 389, 445, 464, 636, 3268} }
 
 // configDCSegments resolves DC segments from a JSON env spec
 // (DEVICE_GRANT_DC_SEGMENTS): {"<org_id>": {"host":"10.10.1.4","ports":[...]}}.
@@ -100,19 +103,39 @@ func (h *DeviceGrantHandler) IssueDCGrant(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "device mTLS identity required"})
 		return
 	}
+	// The grant's did MUST be the device cert CN — the private-access gateway
+	// cross-checks it against the mTLS cert it terminates. deviceID (the row UUID
+	// from ValidateMTLSDevice) is internal-only and must NOT be signed into a grant,
+	// or the gateway rejects every flow with "device_id mismatch".
+	deviceCN := c.GetString("device_cn")
+	if deviceCN == "" {
+		h.logger.Warn("dc-grant: device cert CN unavailable",
+			zap.String("org_id", orgID), zap.String("device_id", deviceID))
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device certificate common name unavailable"})
+		return
+	}
 
 	// Compliance gate — the device must carry a posture report marked compliant.
 	detail, err := h.devices.GetDeviceDetail(c.Request.Context(), orgID, deviceID)
-	if err != nil {
-		h.logger.Warn("dc-grant: device lookup failed",
+	if err != nil || detail == nil {
+		h.logger.Warn("dc-grant: device not enrolled",
 			zap.String("org_id", orgID), zap.String("device_id", deviceID), zap.Error(err))
-		c.JSON(http.StatusForbidden, gin.H{"error": "device not found"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "device not enrolled"})
 		return
 	}
-	if detail == nil || detail.Posture == nil || !detail.Posture.Compliant {
-		h.logger.Info("dc-grant denied: device not compliant",
-			zap.String("org_id", orgID), zap.String("device_id", deviceID))
-		c.JSON(http.StatusForbidden, gin.H{"error": "device is not compliant"})
+	// The machine tunnel is DEVICE-scoped and PRE-LOGON: it gates on device
+	// ENROLMENT (a valid, active device cert — already verified by DeviceMTLSAuth),
+	// NOT live posture. The agent/GUI that reports posture only runs post-login, so
+	// gating the dc-grant on compliance is a chicken-and-egg (posture needs the
+	// tunnel, the tunnel needs the grant) that locks out a freshly-recovered or
+	// pre-logon device. A compromised device is handled by suspending/revoking it
+	// (the status check below), not by posture. Full posture + user-compliance
+	// enforcement lives on the user/SWG tunnel, post-login.
+	if detail.Device.Status != "" && detail.Device.Status != "active" {
+		h.logger.Info("dc-grant denied: device not active",
+			zap.String("org_id", orgID), zap.String("device_id", deviceID),
+			zap.String("status", detail.Device.Status))
+		c.JSON(http.StatusForbidden, gin.H{"error": "device is not active"})
 		return
 	}
 
@@ -124,7 +147,7 @@ func (h *DeviceGrantHandler) IssueDCGrant(c *gin.Context) {
 		return
 	}
 
-	token, err := h.issuer.DCScopeGrant(deviceID, DCSegmentAppID, seg.Host, seg.Ports)
+	token, err := h.issuer.DCScopeGrant(deviceCN, DCSegmentAppID, seg.Host, seg.Ports)
 	if err != nil {
 		h.logger.Error("dc-grant: mint failed",
 			zap.String("org_id", orgID), zap.String("device_id", deviceID), zap.Error(err))

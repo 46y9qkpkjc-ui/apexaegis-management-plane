@@ -4,6 +4,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,58 @@ type Registry struct {
 	store    Store             // nil = in-memory only
 	ca       *auth.CertificateAuthority
 	logger   *zap.Logger
+	// privateAccessIDs marks gateway IDs that are private-access QUIC brokers
+	// (ingress/egress), not selectable SWG PoPs. A broker may also self-declare
+	// via registration metadata kind=private-access; this set is the fallback.
+	privateAccessIDs map[string]bool
+	// streamConnected marks gateways with a live gRPC policy stream. A connected
+	// gateway is reachable, so it stays ONLINE regardless of heartbeat cadence —
+	// otherwise a gateway that connects but heartbeats slowly (or after an MP
+	// restart resets heartbeat state) flaps offline and drops out of discovery.
+	streamConnected map[string]bool
+}
+
+// SetStreamConnected marks/clears a gateway's live gRPC policy-stream connection.
+// On connect the gateway is brought online immediately (it's reachable); on
+// disconnect the heartbeat cleanup takes over after offlineAfter.
+func (r *Registry) SetStreamConnected(gatewayID string, connected bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.streamConnected == nil {
+		r.streamConnected = make(map[string]bool)
+	}
+	if connected {
+		r.streamConnected[gatewayID] = true
+		if gw, ok := r.gateways[gatewayID]; ok {
+			gw.LastHeartbeat = time.Now()
+			gw.Status = "online"
+		}
+	} else {
+		delete(r.streamConnected, gatewayID)
+	}
+}
+
+// SetPrivateAccessIDs configures which registered gateways are private-access
+// brokers (excluded from the SWG PoP list, surfaced on /private-gateways instead).
+func (r *Registry) SetPrivateAccessIDs(ids []string) {
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			m[id] = true
+		}
+	}
+	r.mu.Lock()
+	r.privateAccessIDs = m
+	r.mu.Unlock()
+}
+
+// isPrivateAccess reports whether a gateway is a private-access broker rather than
+// a selectable SWG PoP. Caller must hold r.mu (read or write).
+func (r *Registry) isPrivateAccess(gw *GatewayNode) bool {
+	if gw.Metadata != nil && gw.Metadata["kind"] == "private-access" {
+		return true
+	}
+	return r.privateAccessIDs[gw.ID]
 }
 
 // NewRegistry creates a registry. Call LoadFromDB() after to restore persisted state.
@@ -177,13 +230,30 @@ func (r *Registry) List() []*GatewayNode {
 }
 
 // ListAvailable returns only online gateways.
+// ListAvailable returns online SELECTABLE SWG PoPs — private-access brokers
+// (ingress/egress) are excluded; they're on ListPrivateAccess instead.
 func (r *Registry) ListAvailable() []*GatewayNode {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	result := make([]*GatewayNode, 0)
 	for _, gw := range r.gateways {
-		if gw.Status == "online" {
+		if gw.Status == "online" && !r.isPrivateAccess(gw) {
+			result = append(result, gw)
+		}
+	}
+	return result
+}
+
+// ListPrivateAccess returns online private-access broker gateways (QUIC ingress/
+// egress), for /api/v1/private-gateways/available.
+func (r *Registry) ListPrivateAccess() []*GatewayNode {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make([]*GatewayNode, 0)
+	for _, gw := range r.gateways {
+		if gw.Status == "online" && r.isPrivateAccess(gw) {
 			result = append(result, gw)
 		}
 	}
@@ -238,6 +308,9 @@ func (r *Registry) StartCleanupLoop(ctx context.Context) {
 		case <-ticker.C:
 			r.mu.Lock()
 			for id, gw := range r.gateways {
+				if r.streamConnected[id] {
+					continue // live gRPC policy stream ⇒ reachable ⇒ stays online
+				}
 				since := time.Since(gw.LastHeartbeat)
 				switch {
 				case since > staleRemoveAfter:

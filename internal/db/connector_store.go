@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -25,10 +26,13 @@ type ConnectorConfig struct {
 }
 
 // ConnectorGroup / ConnectorUser mirror the connector's snapshot payload (SID-keyed).
+// SyncEnabled is admin-controlled (not part of the snapshot) — it gates whether the
+// group is bridged into native policy groups and thus flows into the system.
 type ConnectorGroup struct {
 	SID            string `json:"sid"`
 	Name           string `json:"name"`
 	SAMAccountName string `json:"sam_account_name"`
+	SyncEnabled    bool   `json:"sync_enabled"`
 }
 
 type ConnectorUser struct {
@@ -79,18 +83,26 @@ func (s *ConnectorStore) ReplaceSnapshot(ctx context.Context, connectorID string
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM system_mgmt.connector_groups WHERE connector_id = $1`, connectorID); err != nil {
-		return fmt.Errorf("clear groups: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM system_mgmt.connector_users WHERE connector_id = $1`, connectorID); err != nil {
 		return fmt.Errorf("clear users: %w", err)
 	}
+	// Groups are upserted (not wiped) so the admin's per-group sync_enabled gate
+	// survives every re-sync. now() is the transaction timestamp (constant within
+	// the tx), so groups absent from this snapshot keep an older synced_at and are
+	// pruned below.
 	for _, g := range groups {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO system_mgmt.connector_groups (connector_id, sid, name, sam_account_name)
-			VALUES ($1, $2, $3, $4)`, connectorID, g.SID, g.Name, g.SAMAccountName); err != nil {
-			return fmt.Errorf("insert group %s: %w", g.SID, err)
+			INSERT INTO system_mgmt.connector_groups (connector_id, sid, name, sam_account_name, synced_at)
+			VALUES ($1, $2, $3, $4, now())
+			ON CONFLICT (connector_id, sid) DO UPDATE SET
+			  name = excluded.name, sam_account_name = excluded.sam_account_name, synced_at = now()`,
+			connectorID, g.SID, g.Name, g.SAMAccountName); err != nil {
+			return fmt.Errorf("upsert group %s: %w", g.SID, err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM system_mgmt.connector_groups WHERE connector_id = $1 AND synced_at < now()`, connectorID); err != nil {
+		return fmt.Errorf("prune stale groups: %w", err)
 	}
 	for _, u := range users {
 		gsids, _ := json.Marshal(u.GroupSIDs)
@@ -203,7 +215,7 @@ func (s *ConnectorStore) ListGroups(ctx context.Context, connectorID, filter str
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM system_mgmt.connector_groups `+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count connector groups: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT sid, name, sam_account_name
+	rows, err := s.db.QueryContext(ctx, `SELECT sid, name, sam_account_name, sync_enabled
 		FROM system_mgmt.connector_groups `+where+fmt.Sprintf(` ORDER BY name ASC LIMIT %d OFFSET %d`, limit, offset), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list connector groups: %w", err)
@@ -213,11 +225,27 @@ func (s *ConnectorStore) ListGroups(ctx context.Context, connectorID, filter str
 	for rows.Next() {
 		var g ConnectorGroup
 		var name, sam sql.NullString
-		if err := rows.Scan(&g.SID, &name, &sam); err != nil {
+		if err := rows.Scan(&g.SID, &name, &sam, &g.SyncEnabled); err != nil {
 			return nil, 0, fmt.Errorf("scan connector group: %w", err)
 		}
 		g.Name, g.SAMAccountName = name.String, sam.String
 		out = append(out, g)
 	}
 	return out, total, rows.Err()
+}
+
+// SetGroupSyncEnabled toggles whether a connector group is allowed to flow into
+// the system (bridged into native policy groups). The BridgeGroups reconcile then
+// adds/removes the native group accordingly.
+func (s *ConnectorStore) SetGroupSyncEnabled(ctx context.Context, connectorID, sid string, enabled bool) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE system_mgmt.connector_groups SET sync_enabled = $3
+		WHERE connector_id = $1 AND sid = $2`, connectorID, sid, enabled)
+	if err != nil {
+		return fmt.Errorf("set sync_enabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("connector group not found")
+	}
+	return nil
 }

@@ -337,6 +337,10 @@ func DeviceMTLSAuth(validator deviceMTLSValidator) gin.HandlerFunc {
 		c.Set("org_id", tenantID)
 		c.Set("device_org_id", tenantID)
 		c.Set("device_id", deviceID)
+		// device_cn is the device cert Common Name — the identity the private-access
+		// gateway cross-checks a grant against (it terminates the same mTLS cert).
+		// device_id above is the internal row UUID and must never be signed into a grant.
+		c.Set("device_cn", extractCN(identity.subject))
 		c.Set("device_cert_subject", identity.subject)
 		c.Set("device_cert_serial", identity.serial)
 		c.Set("device_cert_fingerprint_sha256", identity.fingerprint)

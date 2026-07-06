@@ -160,6 +160,41 @@ func (s *StepCADeviceCA) IssueDeviceCertificate(ctx context.Context, csrPEM, org
 	}, nil
 }
 
+// EnrolToken is a one-time step-ca JWK token an agent uses to enrol itself
+// (`step ca certificate <subject> dev.crt dev.key --token <token>`), keeping its
+// private key on the device. Returned by the MP-brokered /enroll flow once the
+// per-org enrolment secret checks out.
+type EnrolToken struct {
+	Token       string    `json:"token"`
+	CAURL       string    `json:"ca_url"`
+	Fingerprint string    `json:"ca_fingerprint"`
+	Provisioner string    `json:"provisioner"`
+	Subject     string    `json:"subject"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// MintEnrolToken mints a one-time, short-lived (5 min) enrolment token for the
+// given device subject (CN/hostname) using the configured JWK provisioner. The
+// agent uses it to obtain its cert directly from the CA; the MP never sees the key.
+func (s *StepCADeviceCA) MintEnrolToken(ctx context.Context, subject string) (*EnrolToken, error) {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return nil, errors.New("subject (device id) is required")
+	}
+	tok, err := s.mintToken(ctx, subject)
+	if err != nil {
+		return nil, err
+	}
+	return &EnrolToken{
+		Token:       tok,
+		CAURL:       s.caURL,
+		Fingerprint: s.fingerprint,
+		Provisioner: s.provisioner,
+		Subject:     subject,
+		ExpiresAt:   time.Now().Add(5 * time.Minute),
+	}, nil
+}
+
 // mintToken builds + signs a one-time JWK-provisioner token for the device identity.
 func (s *StepCADeviceCA) mintToken(ctx context.Context, deviceID string) (string, error) {
 	priv, kid, err := s.provisionerKey(ctx)

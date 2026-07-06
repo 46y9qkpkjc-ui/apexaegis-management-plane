@@ -241,6 +241,7 @@ func (s *Server) PolicyStream(req *pb.PolicyStreamRequest, stream grpc.ServerStr
 	}
 
 	s.logger.Info("Policy stream opened", zap.String("gateway", gatewayID))
+	s.deps.Registry.SetStreamConnected(gatewayID, true) // live stream ⇒ reachable ⇒ online
 
 	// Create a per-gateway event channel
 	ch := make(chan *pb.PolicyEvent, 32)
@@ -253,6 +254,7 @@ func (s *Server) PolicyStream(req *pb.PolicyStreamRequest, stream grpc.ServerStr
 		delete(s.subs, gatewayID)
 		s.subsMu.Unlock()
 		close(ch)
+		s.deps.Registry.SetStreamConnected(gatewayID, false)
 		s.logger.Info("Policy stream closed", zap.String("gateway", gatewayID))
 	}()
 

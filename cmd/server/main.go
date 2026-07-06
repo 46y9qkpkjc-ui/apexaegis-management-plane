@@ -24,6 +24,7 @@ import (
 
 	"github.com/zcp/management-plane/internal/api/handlers"
 	"github.com/zcp/management-plane/internal/api/middleware"
+	"github.com/zcp/management-plane/internal/assistant"
 	"github.com/zcp/management-plane/internal/audit"
 	"github.com/zcp/management-plane/internal/auth"
 	"github.com/zcp/management-plane/internal/db"
@@ -114,6 +115,8 @@ func main() {
 	featureStore := db.NewFeatureStore(dbConn)
 	profileStore := db.NewProfileStore(dbConn)
 	deviceStore := db.NewDeviceStore(dbConn, logger)
+	urlCategoryStore := db.NewURLCategoryStore(dbConn, logger)
+	policyObjectStore := db.NewPolicyObjectStore(dbConn, logger)
 	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
 
 	// ── Device-grant issuer (machine-tunnel DC-scope grants) ──
@@ -121,7 +124,12 @@ func main() {
 	// signing key the gateways verify with. Optional — disabled if the key is unset.
 	var deviceGrantHandler *handlers.DeviceGrantHandler
 	if grantKey := os.Getenv("PRIVATE_ACCESS_GRANT_SIGNING_KEY"); grantKey != "" {
-		grantIssuer, gErr := grant.NewIssuer(grantKey, grant.WithIssuer(envOrDefault("DEVICE_API_DOMAIN", grant.DefaultIssuer)))
+		// 20-min TTL (not the 5-min default): grants are cross-cloud (AWS MP →
+		// Azure ad-gw) and a short TTL is fragile against clock skew. Still short
+		// enough to bound a leaked bearer grant.
+		grantIssuer, gErr := grant.NewIssuer(grantKey,
+			grant.WithIssuer(envOrDefault("DEVICE_API_DOMAIN", grant.DefaultIssuer)),
+			grant.WithTTL(20*time.Minute))
 		if gErr != nil {
 			logger.Warn("device-grant issuance disabled: invalid PRIVATE_ACCESS_GRANT_SIGNING_KEY", zap.Error(gErr))
 		} else if dcSegments, sErr := handlers.NewConfigDCSegments(os.Getenv("DEVICE_GRANT_DC_SEGMENTS")); sErr != nil {
@@ -141,6 +149,10 @@ func main() {
 		logger.Warn("Failed to restore gateway registry from DB (starting fresh)", zap.Error(err))
 	}
 	go gwRegistry.StartCleanupLoop(ctx)
+	// Classify private-access ingress brokers (QUIC micro-tunnel) so they are
+	// excluded from the selectable SWG PoP list and surfaced on /private-gateways.
+	// A broker may also self-declare via registration metadata kind=private-access.
+	gwRegistry.SetPrivateAccessIDs(strings.Split(envOrDefault("PRIVATE_ACCESS_GATEWAY_IDS", "ad-gw.apexaegis.app"), ","))
 
 	// ── Auth store (user authentication + JWT) ──
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -151,8 +163,10 @@ func main() {
 
 	// Device-cert issuer: prefer the device step-ca; fall back to legacy ACM PCA.
 	var deviceCA security.DeviceCertificateIssuer
+	var enrolCA *security.StepCADeviceCA // concrete step-ca — mints MP-brokered enrol tokens
 	if stepca, scErr := security.NewStepCADeviceCA(ctx); scErr == nil {
 		deviceCA = stepca
+		enrolCA = stepca
 		logger.Info("device enrollment: device step-ca enabled")
 	} else if pca, pcaErr := security.NewAWSPrivateCA(ctx); pcaErr == nil {
 		deviceCA = pca
@@ -162,8 +176,24 @@ func main() {
 			zap.NamedError("stepca", scErr), zap.NamedError("acmpca", pcaErr))
 	}
 
+	// Kerberos SSO validator: OFFLINE SPNEGO validation via a service keytab.
+	// Keytab is delivered base64 in MP_KRB5_KEYTAB_B64 (SSM SecureString); SPN
+	// and realm are non-secret plain env (MP_KRB5_SPN / MP_KRB5_REALM). Nil when
+	// unset → /agent/sso/kerberos returns 503. Never contacts the DC — the client
+	// acquires its ticket over the gateway machine-tunnel, the MP only decrypts it.
+	var kerberosValidator *security.KerberosValidator
+	if ktB64 := os.Getenv("MP_KRB5_KEYTAB_B64"); ktB64 != "" {
+		if kv, kvErr := security.NewKerberosValidator(ktB64, os.Getenv("MP_KRB5_SPN"), os.Getenv("MP_KRB5_REALM"), logger); kvErr != nil {
+			logger.Warn("kerberos sso disabled: invalid keytab config", zap.Error(kvErr))
+		} else {
+			kerberosValidator = kv
+			logger.Info("kerberos sso enabled", zap.String("spn", kv.SPN()), zap.String("realm", kv.Realm()))
+		}
+	}
+
 	// ── SCIM store (admin + client user provisioning) ──
 	scimStore := db.NewSCIMStore(dbConn, logger)
+	provStore := db.NewProvisioningStore(dbConn, db.NewDirectoryStore(dbConn, logger), logger)
 
 	// ── P2P mesh coordinator ──
 	meshCoordinator := gateway.NewMeshCoordinator(logger)
@@ -314,7 +344,7 @@ func main() {
 	connectorAPI := router.Group("/api/v1/connector")
 	{
 		connectorStore := db.NewConnectorStore(dbConn, logger)
-		connectorHandler := handlers.NewConnectorHandler(connectorStore, logger)
+		connectorHandler := handlers.NewConnectorHandler(connectorStore, provStore, logger)
 		connectorAPI.GET("/config", connectorHandler.GetConfig)
 		connectorAPI.POST("/sync", connectorHandler.PostSync)
 	}
@@ -387,6 +417,21 @@ func main() {
 		deviceAPI.GET("/:id", deviceHandler.GetDevice)
 	}
 
+	// Objects API (admin-only) — URL categories and their domain membership.
+	objectsAPI := router.Group("/api/v1/objects")
+	objectsAPI.Use(middleware.JWTAuth(authStore))
+	objectsAPI.Use(middleware.RequireWriteAccess())
+	{
+		urlCatHandler := handlers.NewURLCategoryHandler(urlCategoryStore, logger)
+		objectsAPI.GET("/url-categories", urlCatHandler.ListCategories)
+		objectsAPI.GET("/url-categories/:id", urlCatHandler.GetCategory)
+		objectsAPI.GET("/categorize", urlCatHandler.Categorize)
+
+		objHandler := handlers.NewPolicyObjectHandler(policyObjectStore, logger)
+		objectsAPI.GET("/cloud-apps", objHandler.ListCloudApps)
+		objectsAPI.GET("/device-groups", objHandler.ListDeviceGroups)
+	}
+
 	// Group Inventory API (admin-only — includes SCIM-pushed groups)
 	groupAPI := router.Group("/api/v1/groups")
 	groupAPI.Use(middleware.JWTAuth(authStore))
@@ -397,6 +442,27 @@ func main() {
 		groupAPI.POST("", groupHandler.CreateGroup)
 		groupAPI.PUT("/:id", groupHandler.UpdateGroup)
 		groupAPI.DELETE("/:id", groupHandler.DeleteGroup)
+		// Directory-import toggle: enable/disable provisioning from an AD (ldap) group,
+		// then reconcile immediately so onboarding/offboarding reflects the change.
+		groupAPI.PUT("/:id/import", func(c *gin.Context) {
+			var req struct {
+				ImportEnabled bool `json:"import_enabled"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+				return
+			}
+			if err := scimStore.SetGroupImportEnabled(c.Request.Context(), db.SystemThreatOrgID, c.Param("id"), req.ImportEnabled); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			res, err := provStore.Reconcile(c.Request.Context(), envOrDefault("ASSISTANT_CONNECTOR_ID", "ad-connector"), db.SystemThreatOrgID, "")
+			if err != nil {
+				c.JSON(http.StatusOK, gin.H{"import_enabled": req.ImportEnabled, "reconcile_error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"import_enabled": req.ImportEnabled, "reconcile": res})
+		})
 	}
 
 	// SCIM 2.0 provisioning API (RFC 7644 — bearer token auth from IdPs)
@@ -469,11 +535,27 @@ func main() {
 		publicGWAPI.GET("/available", gwHandler.ListAvailableGateways)
 	}
 
+	// Private-access ingress brokers (QUIC micro-tunnel, e.g. ad-gw) — separate
+	// from selectable SWG PoPs above so clients don't offer a broker as a PoP.
+	privateGWAPI := router.Group("/api/v1/private-gateways")
+	privateGWAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	{
+		pgwHandler := handlers.NewGatewayHandler(gwRegistry, policyStore, ca, logger)
+		privateGWAPI.GET("/available", pgwHandler.ListAvailablePrivateGateways)
+	}
+
 	// Agent bootstrap endpoint. The handler itself validates device mTLS and tenant ID.
 	agentAPI := router.Group("/api/v1/agent")
 	{
 		agentAuthHandler := handlers.NewAgentAuthHandler(deviceStore, authStore, logger)
 		agentAPI.POST("/auth", agentAuthHandler.Authenticate)
+
+		// Kerberos SSO: bind the logged-in AD user to this mTLS device so the
+		// agent token carries the user's directory groups. The handler validates
+		// device mTLS + SPNEGO itself (no middleware), same as /auth.
+		kerberosSSOHandler := handlers.NewKerberosSSOHandler(
+			kerberosValidator, deviceStore, db.NewDirectoryStore(dbConn, logger), authStore, logger)
+		agentAPI.POST("/sso/kerberos", kerberosSSOHandler.Authenticate)
 	}
 
 	// Device-authenticated client runtime configuration endpoints.
@@ -491,6 +573,11 @@ func main() {
 			deviceClientAPI.POST("/dc-grant", deviceGrantHandler.IssueDCGrant)
 		}
 	}
+
+	// MP-brokered device enrolment (unauthenticated — the per-org enrolment secret
+	// is the auth). Validates the secret → mints a one-time step-ca token.
+	enrolHandler := handlers.NewEnrolHandler(db.NewEnrolSecretStore(dbConn, logger), enrolCA, logger)
+	router.POST("/api/v1/enroll", enrolHandler.Enroll)
 
 	// Device-authenticated legacy agent policy endpoint.
 	agentPolicyAPI := router.Group("/api/v1/agent")
@@ -564,11 +651,68 @@ func main() {
 		adminAPI.POST("/idp/:id/test", idpTestHandler.TestConnection)
 
 		// AD-sync connector — web-ui-managed LDAP config + synced directory
-		connectorAdminHandler := handlers.NewConnectorAdminHandler(db.NewConnectorStore(dbConn, logger), logger)
+		connectorAdminHandler := handlers.NewConnectorAdminHandler(
+			db.NewConnectorStore(dbConn, logger), db.NewDirectoryStore(dbConn, logger), db.SystemThreatOrgID, logger)
 		adminAPI.GET("/connectors/:connector_id/config", connectorAdminHandler.GetConnectorConfig)
 		adminAPI.PUT("/connectors/:connector_id/config", connectorAdminHandler.UpdateConnectorConfig)
 		adminAPI.GET("/connectors/:connector_id/users", connectorAdminHandler.ListConnectorUsers)
 		adminAPI.GET("/connectors/:connector_id/groups", connectorAdminHandler.ListConnectorGroups)
+		adminAPI.PATCH("/connectors/:connector_id/groups/:sid/sync", connectorAdminHandler.SetGroupSyncEnabled)
+
+		// Apply the AD-group flow gate at startup (once, in the background) so a deploy
+		// immediately reconciles native policy groups to the allowed connector groups —
+		// no waiting for the next ~15m sync or a manual toggle. Backgrounded so it never
+		// delays the listener / ELB health checks.
+		go func() {
+			bctx, bcancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer bcancel()
+			connID := envOrDefault("ASSISTANT_CONNECTOR_ID", "ad-connector")
+			if res, bErr := db.NewDirectoryStore(dbConn, logger).BridgeGroups(bctx, connID, db.SystemThreatOrgID); bErr != nil {
+				logger.Warn("startup group bridge failed", zap.Error(bErr))
+			} else {
+				logger.Info("startup group bridge complete",
+					zap.Int("created", res.Created), zap.Int("linked", res.Linked), zap.Int("removed", res.Removed))
+			}
+		}()
+
+		// Voice/agent admin — identity bridge + explain-access + grant-access
+		assistantSvc := assistant.NewService(
+			db.NewDirectoryStore(dbConn, logger),
+			db.NewAddressStore(dbConn, logger),
+			policyStore,
+			deviceStore,
+			envOrDefault("ASSISTANT_CONNECTOR_ID", "ad-connector"),
+			db.SystemThreatOrgID,
+			logger,
+		)
+		// Raw DB handle for the org-aware evidence tools (block evidence,
+		// category impact, security events) — resolves users across tenants.
+		assistantSvc.SetDB(dbConn)
+		var assistantAgent *assistant.Agent
+		var assistantVoice *assistant.VoiceService
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			assistantAgent = assistant.NewAgent(assistantSvc, key, logger)
+			if dg, el := os.Getenv("DEEPGRAM_API_KEY"), os.Getenv("ELEVENLABS_API_KEY"); dg != "" && el != "" {
+				assistantVoice = assistant.NewVoiceService(assistantAgent, dg, el, os.Getenv("ELEVENLABS_VOICE_ID"), logger)
+			} else {
+				logger.Warn("DEEPGRAM_API_KEY/ELEVENLABS_API_KEY unset — assistant /voice + /speak disabled")
+			}
+		} else {
+			logger.Warn("ANTHROPIC_API_KEY unset — assistant /chat (Claude agent) endpoint disabled")
+		}
+		assistantHandler := handlers.NewAssistantHandler(assistantSvc, assistantAgent, assistantVoice, logger)
+		adminAPI.POST("/assistant/chat", assistantHandler.Chat)
+		adminAPI.POST("/assistant/voice", assistantHandler.Voice)
+		adminAPI.POST("/assistant/speak", assistantHandler.Speak)
+		adminAPI.POST("/assistant/explain-access", assistantHandler.ExplainAccess)
+		adminAPI.POST("/assistant/grant-access", assistantHandler.GrantAccess)
+		adminAPI.POST("/assistant/bridge", assistantHandler.Bridge)
+		adminAPI.POST("/assistant/seed-demo", assistantHandler.SeedDemo)
+
+		// Device enrolment secrets — per-org wall for MP-brokered auto-enrolment.
+		adminAPI.POST("/enrol-secrets", enrolHandler.GenerateSecret)
+		adminAPI.GET("/enrol-secrets", enrolHandler.ListSecrets)
+		adminAPI.DELETE("/enrol-secrets/:id", enrolHandler.RevokeSecret)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
@@ -689,6 +833,40 @@ func main() {
 		featureAPI.GET("/:id", featHandler.GetFeature)
 		featureAPI.PUT("/:id/toggle", featHandler.ToggleFeature)
 		featureAPI.POST("/:id/trial", featHandler.StartTrial)
+	}
+
+	// Tenants API — consolidated MSP overview + per-tenant dashboards. Cross-tenant
+	// by design (manager-of-managers). Gated to admin roles.
+	tenantHandler := handlers.NewTenantHandler(db.NewTenantStore(dbConn, logger), logger)
+	tenantAPI := router.Group("/api/v1/admin/tenants")
+	tenantAPI.Use(middleware.JWTAuth(authStore))
+	tenantAPI.Use(middleware.RequireWriteAccess())
+	{
+		tenantAPI.GET("", tenantHandler.ListTenants)
+		tenantAPI.GET("/:id", tenantHandler.GetTenant)
+	}
+	// Cross-tenant policy detail — the /policies/:id deep-link the assistant returns.
+	policyDetailAPI := router.Group("/api/v1/admin/policy")
+	policyDetailAPI.Use(middleware.JWTAuth(authStore))
+	policyDetailAPI.Use(middleware.RequireWriteAccess())
+	{
+		policyDetailAPI.GET("/:id", tenantHandler.GetPolicy)
+	}
+
+	// RBAC API — custom roles with per-page access toggles, tenant-scoped or
+	// global (MSP). Governs console page access, not tenant data isolation.
+	rbacAPI := router.Group("/api/v1/admin/rbac")
+	rbacAPI.Use(middleware.JWTAuth(authStore))
+	rbacAPI.Use(middleware.RequireWriteAccess())
+	{
+		rbacHandler := handlers.NewRBACHandler(db.NewRBACStore(dbConn, logger), logger)
+		rbacAPI.GET("/tenants", rbacHandler.ListTenants)
+		rbacAPI.GET("/pages", rbacHandler.ListPages)
+		rbacAPI.GET("/effective-pages", rbacHandler.EffectivePages)
+		rbacAPI.GET("/roles", rbacHandler.ListRoles)
+		rbacAPI.POST("/roles", rbacHandler.CreateRole)
+		rbacAPI.PUT("/roles/:id", rbacHandler.UpdateRole)
+		rbacAPI.DELETE("/roles/:id", rbacHandler.DeleteRole)
 	}
 
 	// Security Profiles API

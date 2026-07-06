@@ -29,6 +29,10 @@ type SecurityPolicy struct {
 	SourceUserGroups   []string        `json:"source_user_groups"`
 	SourceDevices      []string        `json:"source_devices"`
 	SourceDeviceGroups []string        `json:"source_device_groups"`
+	// SourceDevicePosture gates a policy on device compliance: "any" (default) or
+	// "compliant" (only posture-passing devices match). Set by the policy wizard's
+	// compliance gate and read by the assistant when warning about non-compliance.
+	SourceDevicePosture string        `json:"source_device_posture"`
 	SourceAddresses    json.RawMessage `json:"source_addresses,omitempty"`
 	SourceIPNegate     bool            `json:"source_ip_negate"`
 	DestAddresses      json.RawMessage `json:"dest_addresses,omitempty"`

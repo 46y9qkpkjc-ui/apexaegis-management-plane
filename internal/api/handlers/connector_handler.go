@@ -19,11 +19,12 @@ import (
 // cert (Device CA) reaching this path over another listener is rejected.
 type ConnectorHandler struct {
 	store  *db.ConnectorStore
+	prov   *db.ProvisioningStore // reconciles onboard/offboard on each sync; may be nil
 	logger *zap.Logger
 }
 
-func NewConnectorHandler(store *db.ConnectorStore, logger *zap.Logger) *ConnectorHandler {
-	return &ConnectorHandler{store: store, logger: logger}
+func NewConnectorHandler(store *db.ConnectorStore, prov *db.ProvisioningStore, logger *zap.Logger) *ConnectorHandler {
+	return &ConnectorHandler{store: store, prov: prov, logger: logger}
 }
 
 // requireConnectorMTLS confirms the request arrived over Infra-CA mTLS (the ALB
@@ -89,5 +90,14 @@ func (h *ConnectorHandler) PostSync(c *gin.Context) {
 	h.logger.Info("connector sync",
 		zap.String("connector_id", connID), zap.String("domain", payload.Domain),
 		zap.Int("users", len(payload.Users)), zap.Int("groups", len(payload.Groups)))
+
+	// Reconcile org membership (onboard/offboard) from the fresh snapshot. Best-effort:
+	// the snapshot is already stored, so a reconcile error simply retries next sync.
+	if h.prov != nil {
+		if _, err := h.prov.Reconcile(c.Request.Context(), connID, db.SystemThreatOrgID, payload.Domain); err != nil {
+			h.logger.Error("provisioning reconcile", zap.String("connector_id", connID), zap.Error(err))
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"synced_users": len(payload.Users), "synced_groups": len(payload.Groups)})
 }

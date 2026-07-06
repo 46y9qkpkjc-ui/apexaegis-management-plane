@@ -124,7 +124,11 @@ variable "device_stepca_provisioner" {
 variable "device_grant_dc_segments" {
   description = "JSON map of DC segments a machine tunnel may reach pre-logon: {\"*\":{\"host\":\"<DC IP>\",\"ports\":[...]}}."
   type        = string
-  default     = "{\"*\":{\"host\":\"10.10.1.4\",\"ports\":[53,88,389,445,464,123]}}"
+  # AD service set for domain-join + Kerberos logon over the tunnel: Kerberos(88),
+  # LDAP(389), SMB/SYSVOL(445), kpasswd(464), LDAPS(636), Global Catalog(3268).
+  # DNS(53) is handled by the client DNS shim and NTP(123) by the host clock, so
+  # both are out; CLDAP/RPC are intentionally excluded (agent per-port loopbacks).
+  default = "{\"*\":{\"host\":\"10.10.1.4\",\"ports\":[88,389,445,464,636,3268]}}"
 }
 
 variable "device_grant_prelogon_gateway" {
@@ -664,6 +668,11 @@ resource "aws_ecs_task_definition" "mgmt" {
       { name = "DEVICE_STEPCA_URL", value = var.device_stepca_url },
       { name = "DEVICE_STEPCA_FINGERPRINT", value = var.device_stepca_fingerprint },
       { name = "DEVICE_STEPCA_PROVISIONER", value = var.device_stepca_provisioner },
+      # Kerberos SSO (POST /api/v1/agent/sso/kerberos): the SPN the client
+      # acquires a service ticket for, and the AD realm. Non-secret; the keytab
+      # itself rides MP_KRB5_KEYTAB_B64 (SSM SecureString, in secrets below).
+      { name = "MP_KRB5_SPN", value = "HTTP/api.apexaegis.app@AD.APEXAEGIS.APP" },
+      { name = "MP_KRB5_REALM", value = "AD.APEXAEGIS.APP" },
     ]
 
     secrets = [
@@ -690,6 +699,31 @@ resource "aws_ecs_task_definition" "mgmt" {
         # decrypts the provisioner key so the MP can mint OTTs to sign device CSRs.
         name      = "PORTAL_DEVICE_JWK_PASSWORD"
         valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/portal-device-jwk-password"
+      },
+      {
+        # Anthropic API key for the voice/agent admin (/api/v1/admin/assistant/chat).
+        # SSM SecureString, created out-of-band so the key never enters Terraform
+        # state or git. Unset ⇒ /chat returns 503 but the deterministic endpoints work.
+        name      = "ANTHROPIC_API_KEY"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/anthropic-api-key"
+      },
+      {
+        # Deepgram (speech-to-text) for the voice admin. SSM SecureString, out-of-band.
+        name      = "DEEPGRAM_API_KEY"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/deepgram-api-key"
+      },
+      {
+        # ElevenLabs (text-to-speech) for the voice admin. SSM SecureString, out-of-band.
+        name      = "ELEVENLABS_API_KEY"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/elevenlabs-api-key"
+      },
+      {
+        # Kerberos service keytab (base64) for OFFLINE SPNEGO validation of the
+        # HTTP/api.apexaegis.app SPN (svc-apex-mp). SSM SecureString, created
+        # out-of-band so the keytab never enters Terraform state or git. Unset ⇒
+        # /agent/sso/kerberos returns 503; nothing else is affected.
+        name      = "MP_KRB5_KEYTAB_B64"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/kerberos-keytab"
       },
     ]
 
@@ -765,6 +799,10 @@ resource "aws_iam_policy" "ssm_read" {
         aws_ssm_parameter.vault_passphrase.arn,
         aws_ssm_parameter.grant_signing_key.arn,
         "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/portal-device-jwk-password",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/anthropic-api-key",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/deepgram-api-key",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/elevenlabs-api-key",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/kerberos-keytab",
       ]
       }, {
       Effect   = "Allow"

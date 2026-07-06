@@ -49,6 +49,9 @@ func doGrantRequest(h *DeviceGrantHandler, orgID, deviceID string) *httptest.Res
 	}
 	if deviceID != "" {
 		c.Set("device_id", deviceID)
+		// DeviceMTLSAuth sets device_cn (the cert CN) alongside device_id; the grant's
+		// did is signed from the CN. In these tests deviceID stands in for the CN.
+		c.Set("device_cn", deviceID)
 	}
 	h.IssueDCGrant(c)
 	return w
@@ -100,19 +103,32 @@ func TestIssueDCGrant_Compliant(t *testing.T) {
 	}
 }
 
-func TestIssueDCGrant_NonCompliant(t *testing.T) {
-	h := newTestGrantHandler(t, fakeDevices{detail: &db.DeviceDetail{Posture: &db.DevicePostureReport{Compliant: false}}}, `{"*":{"host":"10.10.1.4"}}`)
-	w := doGrantRequest(h, "org1", "PC01$")
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for non-compliant device, got %d", w.Code)
+// The machine tunnel is device-scoped + pre-logon, so posture must NOT gate it —
+// a non-compliant OR missing posture report still gets a dc-grant (posture is
+// enforced on the user/SWG tunnel post-login). Gating here would be a chicken-and-
+// egg: posture needs the tunnel, the tunnel needs the grant.
+func TestIssueDCGrant_PostureDoesNotGateMachineTunnel(t *testing.T) {
+	cases := map[string]*db.DeviceDetail{
+		"non-compliant posture": {Posture: &db.DevicePostureReport{Compliant: false}},
+		"no posture report":     {},
+	}
+	for name, detail := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newTestGrantHandler(t, fakeDevices{detail: detail}, `{"*":{"host":"10.10.1.4"}}`)
+			w := doGrantRequest(h, "org1", "PC01$")
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 (posture must not gate the machine tunnel), got %d: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
-func TestIssueDCGrant_NoPosture(t *testing.T) {
-	h := newTestGrantHandler(t, fakeDevices{detail: &db.DeviceDetail{}}, `{"*":{"host":"10.10.1.4"}}`)
+// A suspended/revoked device IS denied — the machine tunnel gates on device status.
+func TestIssueDCGrant_SuspendedDeviceDenied(t *testing.T) {
+	h := newTestGrantHandler(t, fakeDevices{detail: &db.DeviceDetail{Device: db.DeviceInventoryItem{Status: "suspended"}}}, `{"*":{"host":"10.10.1.4"}}`)
 	w := doGrantRequest(h, "org1", "PC01$")
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when no posture report, got %d", w.Code)
+		t.Fatalf("expected 403 for a suspended device, got %d", w.Code)
 	}
 }
 
