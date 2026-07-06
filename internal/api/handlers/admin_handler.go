@@ -110,8 +110,18 @@ func (h *AdminHandler) UpdatePolicy(c *gin.Context) {
 }
 
 func (h *AdminHandler) ListPolicies(c *gin.Context) {
+	// Scope to the active tenant (org_id set by JWT/tenant switcher). Without this
+	// the page showed every tenant's policies identically.
+	orgID := c.GetString("org_id")
+	all := h.policyStore.List()
+	scoped := all[:0:0]
+	for _, p := range all {
+		if orgID == "" || p.OrgID == orgID {
+			scoped = append(scoped, p)
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"policies": h.policyStore.List(),
+		"policies": scoped,
 		"version":  h.policyStore.Version(),
 	})
 }

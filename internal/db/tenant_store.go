@@ -302,7 +302,8 @@ const tenantSummaryCols = `
 	(SELECT count(*) FROM system_mgmt.users u          WHERE u.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.client_users c   WHERE c.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.policies p        WHERE p.org_id = o.id::text),
-	(SELECT count(*) FROM system_mgmt.devices d         WHERE d.org_id = o.id),
+	CASE WHEN o.device_count > 0 THEN o.device_count
+	     ELSE (SELECT count(*) FROM system_mgmt.devices d WHERE d.org_id = o.id) END,
 	(SELECT count(*) FROM system_mgmt.dns_access_logs l WHERE l.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.dns_access_logs l WHERE l.org_id = o.id AND l.verdict = 'blocked')`
 
