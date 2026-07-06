@@ -64,6 +64,43 @@ type TenantDetail struct {
 	GhostedApps  []GhostedAppRow   `json:"ghosted_apps"`
 }
 
+// PostureProfile is a tenant's device posture check configuration.
+type PostureProfile struct {
+	CheckDeviceCert     bool `json:"check_device_cert"`
+	CheckAV             bool `json:"check_av"`
+	CheckDiskEncryption bool `json:"check_disk_encryption"`
+	CheckOSPatch        bool `json:"check_os_patch"`
+}
+
+// GetPostureProfile returns the org's posture profile, creating a default first.
+func (s *TenantStore) GetPostureProfile(ctx context.Context, orgID string) (*PostureProfile, error) {
+	if _, err := s.db.DB.ExecContext(ctx,
+		`INSERT INTO system_mgmt.posture_profiles (org_id) VALUES ($1) ON CONFLICT (org_id) DO NOTHING`, orgID); err != nil {
+		return nil, err
+	}
+	var p PostureProfile
+	err := s.db.DB.QueryRowContext(ctx, `
+		SELECT check_device_cert, check_av, check_disk_encryption, check_os_patch
+		FROM system_mgmt.posture_profiles WHERE org_id = $1`, orgID).
+		Scan(&p.CheckDeviceCert, &p.CheckAV, &p.CheckDiskEncryption, &p.CheckOSPatch)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// UpsertPostureProfile saves the org's posture profile.
+func (s *TenantStore) UpsertPostureProfile(ctx context.Context, orgID string, p PostureProfile) error {
+	_, err := s.db.DB.ExecContext(ctx, `
+		INSERT INTO system_mgmt.posture_profiles
+		  (org_id, check_device_cert, check_av, check_disk_encryption, check_os_patch)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (org_id) DO UPDATE SET
+		  check_device_cert = $2, check_av = $3, check_disk_encryption = $4, check_os_patch = $5, updated_at = now()`,
+		orgID, p.CheckDeviceCert, p.CheckAV, p.CheckDiskEncryption, p.CheckOSPatch)
+	return err
+}
+
 // DeviceRow is a device for the enrolment page inventory + posture view modal.
 type DeviceRow struct {
 	DeviceID    string `json:"device_id"`

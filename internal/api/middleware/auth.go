@@ -48,7 +48,7 @@ func CORS() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "false")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gateway-Key, X-Request-ID, X-ApexAegis-Tenant-ID, X-Tenant-ID")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gateway-Key, X-Request-ID, X-ApexAegis-Tenant-ID, X-Tenant-ID, X-Scope-Tenant-ID")
 		c.Header("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == http.MethodOptions {
@@ -216,6 +216,17 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 		}
 		if email, ok := claims["email"].(string); ok {
 			c.Set("email", email)
+		}
+
+		// MSP tenant scoping: a super_admin (the manager-of-managers) may scope
+		// the entire console to one tenant via the X-Scope-Tenant-ID header set by
+		// the tenant switcher. This overrides org_id so every org-scoped handler
+		// (all 41 pages) reads the selected tenant. Non-super_admins are ignored,
+		// so a tenant admin can never scope to another tenant.
+		if scope := strings.TrimSpace(c.GetHeader("X-Scope-Tenant-ID")); scope != "" && c.GetString("role") == "super_admin" {
+			c.Set("org_id", scope)
+			c.Set("user_org_id", scope)
+			c.Set("scoped_tenant", scope)
 		}
 
 		c.Next()

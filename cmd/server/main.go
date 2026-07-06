@@ -873,6 +873,14 @@ func main() {
 	{
 		reportAPI.POST("/email", tenantHandler.EmailReport)
 	}
+	// Device posture profile (per tenant; honors X-Scope-Tenant-ID for super_admin).
+	postureAPI := router.Group("/api/v1/admin/posture-profile")
+	postureAPI.Use(middleware.JWTAuth(authStore))
+	postureAPI.Use(middleware.RequireWriteAccess())
+	{
+		postureAPI.GET("", tenantHandler.GetPostureProfile)
+		postureAPI.PUT("", tenantHandler.UpdatePostureProfile)
+	}
 
 	// RBAC API — custom roles with per-page access toggles, tenant-scoped or
 	// global (MSP). Governs console page access, not tenant data isolation.

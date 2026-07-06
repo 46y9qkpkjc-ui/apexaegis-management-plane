@@ -59,6 +59,42 @@ func (h *TenantHandler) EmailReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "sent", "detail": reason})
 }
 
+// GetPostureProfile returns the (scoped) tenant's device posture profile.
+func (h *TenantHandler) GetPostureProfile(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	p, err := h.store.GetPostureProfile(c.Request.Context(), orgID)
+	if err != nil {
+		h.logger.Error("get posture profile", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load posture profile"})
+		return
+	}
+	c.JSON(http.StatusOK, p)
+}
+
+// UpdatePostureProfile saves the (scoped) tenant's device posture profile.
+func (h *TenantHandler) UpdatePostureProfile(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	var p db.PostureProfile
+	if err := c.ShouldBindJSON(&p); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if err := h.store.UpsertPostureProfile(c.Request.Context(), orgID, p); err != nil {
+		h.logger.Error("update posture profile", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save posture profile"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "saved"})
+}
+
 // ListDevices returns devices across all tenants for the enrolment inventory.
 func (h *TenantHandler) ListDevices(c *gin.Context) {
 	rows, err := h.store.ListDevices(c.Request.Context(), c.Query("tenant_id"))
