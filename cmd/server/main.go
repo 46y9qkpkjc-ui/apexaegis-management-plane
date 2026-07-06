@@ -844,6 +844,14 @@ func main() {
 	{
 		tenantAPI.GET("", tenantHandler.ListTenants)
 		tenantAPI.GET("/:id", tenantHandler.GetTenant)
+		tenantAPI.GET("/:id/entitlements", tenantHandler.GetEntitlements)
+	}
+	// Subscription tiers (store catalog + billing).
+	tierAPI := router.Group("/api/v1/admin/tiers")
+	tierAPI.Use(middleware.JWTAuth(authStore))
+	tierAPI.Use(middleware.RequireWriteAccess())
+	{
+		tierAPI.GET("", tenantHandler.ListTiers)
 	}
 	// Cross-tenant policy detail — the /policies/:id deep-link the assistant returns.
 	policyDetailAPI := router.Group("/api/v1/admin/policy")

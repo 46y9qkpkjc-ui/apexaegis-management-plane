@@ -64,6 +64,80 @@ type TenantDetail struct {
 	GhostedApps  []GhostedAppRow   `json:"ghosted_apps"`
 }
 
+// SubscriptionTier defines what a tier entitles: features (by rank), gateway
+// licensing, tenancy-deployment type, user limits, price.
+type SubscriptionTier struct {
+	Tier            string `json:"tier"`
+	DisplayName     string `json:"display_name"`
+	Rank            int    `json:"rank"`
+	MaxGateways     int    `json:"max_gateways"`
+	TenancyType     string `json:"tenancy_type"`
+	MaxClientUsers  int    `json:"max_client_users"`
+	MonthlyPriceCts int    `json:"monthly_price_cents"`
+	Description     string `json:"description"`
+}
+
+// Entitlements is a tenant's current tier, its limits, and usage against them.
+type Entitlements struct {
+	TenantID         string           `json:"tenant_id"`
+	TenantName       string           `json:"tenant_name"`
+	Tier             string           `json:"tier"`
+	Limits           SubscriptionTier `json:"limits"`
+	GatewaysUsed     int              `json:"gateways_used"`
+	ClientUsersUsed  int              `json:"client_users_used"`
+	EntitledFeatures int              `json:"entitled_features"`
+}
+
+// ListTiers returns the subscription tiers for the store catalog.
+func (s *TenantStore) ListTiers(ctx context.Context) ([]SubscriptionTier, error) {
+	rows, err := s.db.DB.QueryContext(ctx, `
+		SELECT tier, display_name, rank, max_gateways, tenancy_type, max_client_users, monthly_price_usd, description
+		FROM system_mgmt.subscription_tiers ORDER BY rank`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SubscriptionTier{}
+	for rows.Next() {
+		var t SubscriptionTier
+		if err := rows.Scan(&t.Tier, &t.DisplayName, &t.Rank, &t.MaxGateways, &t.TenancyType,
+			&t.MaxClientUsers, &t.MonthlyPriceCts, &t.Description); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// GetEntitlements returns a tenant's tier, its limits, and usage against them.
+func (s *TenantStore) GetEntitlements(ctx context.Context, orgID string) (*Entitlements, error) {
+	e := &Entitlements{TenantID: orgID}
+	var plan string
+	if err := s.db.DB.QueryRowContext(ctx,
+		`SELECT name, COALESCE(plan,'standard') FROM system_mgmt.organizations WHERE id = $1`, orgID).
+		Scan(&e.TenantName, &plan); err != nil {
+		return nil, err
+	}
+	e.Tier = plan
+	// Tier limits (fall back to an empty tier if the plan has no row).
+	_ = s.db.DB.QueryRowContext(ctx, `
+		SELECT tier, display_name, rank, max_gateways, tenancy_type, max_client_users, monthly_price_usd, description
+		FROM system_mgmt.subscription_tiers WHERE tier = $1`, plan).
+		Scan(&e.Limits.Tier, &e.Limits.DisplayName, &e.Limits.Rank, &e.Limits.MaxGateways,
+			&e.Limits.TenancyType, &e.Limits.MaxClientUsers, &e.Limits.MonthlyPriceCts, &e.Limits.Description)
+	// Usage.
+	_ = s.db.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM system_mgmt.client_users WHERE org_id = $1`, orgID).Scan(&e.ClientUsersUsed)
+	_ = s.db.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM system_mgmt.gateway_nodes WHERE org_id = $1`, orgID).Scan(&e.GatewaysUsed)
+	// Features entitled at this tier (feature.min_plan rank <= tier rank).
+	_ = s.db.DB.QueryRowContext(ctx, `
+		SELECT count(*) FROM system_mgmt.features f
+		JOIN system_mgmt.subscription_tiers fm ON fm.tier = f.min_plan
+		WHERE fm.rank <= $1`, e.Limits.Rank).Scan(&e.EntitledFeatures)
+	return e, nil
+}
+
 // PostureProfile is a tenant's device posture check configuration.
 type PostureProfile struct {
 	CheckDeviceCert     bool `json:"check_device_cert"`

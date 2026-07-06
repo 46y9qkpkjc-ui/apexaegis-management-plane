@@ -59,6 +59,32 @@ func (h *TenantHandler) EmailReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "sent", "detail": reason})
 }
 
+// ListTiers returns the subscription tiers (store catalog).
+func (h *TenantHandler) ListTiers(c *gin.Context) {
+	tiers, err := h.store.ListTiers(c.Request.Context())
+	if err != nil {
+		h.logger.Error("list tiers", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tiers"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"tiers": tiers})
+}
+
+// GetEntitlements returns a tenant's tier limits + usage (feature/gateway/tenancy licensing).
+func (h *TenantHandler) GetEntitlements(c *gin.Context) {
+	e, err := h.store.GetEntitlements(c.Request.Context(), c.Param("id"))
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
+		return
+	}
+	if err != nil {
+		h.logger.Error("get entitlements", zap.Error(err), zap.String("tenant_id", c.Param("id")))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load entitlements"})
+		return
+	}
+	c.JSON(http.StatusOK, e)
+}
+
 // GetPostureProfile returns the (scoped) tenant's device posture profile.
 func (h *TenantHandler) GetPostureProfile(c *gin.Context) {
 	orgID := c.GetString("org_id")
