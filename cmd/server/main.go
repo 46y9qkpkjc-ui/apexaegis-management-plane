@@ -852,6 +852,27 @@ func main() {
 	{
 		policyDetailAPI.GET("/:id", tenantHandler.GetPolicy)
 	}
+	// Consolidated ghosted apps across all tenants (per-tenant is in tenant detail).
+	ghostedAdminAPI := router.Group("/api/v1/admin/ghosted")
+	ghostedAdminAPI.Use(middleware.JWTAuth(authStore))
+	ghostedAdminAPI.Use(middleware.RequireWriteAccess())
+	{
+		ghostedAdminAPI.GET("", tenantHandler.ListGhosted)
+	}
+	// Cross-tenant device inventory for the Device Enrolment page + posture modal.
+	deviceInvAPI := router.Group("/api/v1/admin/devices-inventory")
+	deviceInvAPI.Use(middleware.JWTAuth(authStore))
+	deviceInvAPI.Use(middleware.RequireWriteAccess())
+	{
+		deviceInvAPI.GET("", tenantHandler.ListDevices)
+	}
+	// Email a dashboard report (body composed client-side) via SES.
+	reportAPI := router.Group("/api/v1/admin/report")
+	reportAPI.Use(middleware.JWTAuth(authStore))
+	reportAPI.Use(middleware.RequireWriteAccess())
+	{
+		reportAPI.POST("/email", tenantHandler.EmailReport)
+	}
 
 	// RBAC API — custom roles with per-page access toggles, tenant-scoped or
 	// global (MSP). Governs console page access, not tenant data isolation.

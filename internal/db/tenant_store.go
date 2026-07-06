@@ -44,11 +44,97 @@ type TenantPolicyRow struct {
 	Enabled  bool   `json:"enabled"`
 }
 
+// GhostedAppRow is a shadow/legacy app or service discovered on a tenant's fleet.
+type GhostedAppRow struct {
+	Name        string `json:"name"`
+	Vendor      string `json:"vendor"`
+	Category    string `json:"category"`
+	DeviceCount int    `json:"device_count"`
+	RiskLevel   string `json:"risk_level"`
+	Duplicates  string `json:"duplicates_feature"`
+	TenantName  string `json:"tenant_name"`
+	TenantID    string `json:"tenant_id"`
+}
+
 // TenantDetail is a single tenant's summary plus recent activity.
 type TenantDetail struct {
 	Summary      TenantSummary     `json:"summary"`
 	RecentBlocks []TenantLogRow    `json:"recent_blocks"`
 	Policies     []TenantPolicyRow `json:"policies"`
+	GhostedApps  []GhostedAppRow   `json:"ghosted_apps"`
+}
+
+// DeviceRow is a device for the enrolment page inventory + posture view modal.
+type DeviceRow struct {
+	DeviceID    string `json:"device_id"`
+	Hostname    string `json:"hostname"`
+	OSType      string `json:"os_type"`
+	OSVersion   string `json:"os_version"`
+	Compliance  string `json:"compliance_status"`
+	ManagedType string `json:"managed_type"`
+	LastSeen    string `json:"last_seen"`
+	TenantName  string `json:"tenant_name"`
+	TenantID    string `json:"tenant_id"`
+}
+
+// ListDevices returns devices for one tenant, or all tenants when tenantID is empty.
+func (s *TenantStore) ListDevices(ctx context.Context, tenantID string) ([]DeviceRow, error) {
+	q := `SELECT COALESCE(d.device_id,''), COALESCE(d.device_name,''), COALESCE(d.os_type,''),
+	             COALESCE(d.os_version,''), COALESCE(d.compliance_status,'unknown'), d.managed_type,
+	             COALESCE(d.last_seen::text,''), o.name, o.id::text
+	      FROM system_mgmt.devices d
+	      JOIN system_mgmt.organizations o ON o.id = d.org_id`
+	args := []interface{}{}
+	if tenantID != "" {
+		q += " WHERE d.org_id = $1"
+		args = append(args, tenantID)
+	}
+	q += " ORDER BY o.name, d.device_name"
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DeviceRow{}
+	for rows.Next() {
+		var d DeviceRow
+		if err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OSType, &d.OSVersion, &d.Compliance,
+			&d.ManagedType, &d.LastSeen, &d.TenantName, &d.TenantID); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListGhostedApps returns ghosted apps for one tenant, or all tenants when
+// tenantID is empty (consolidated overview).
+func (s *TenantStore) ListGhostedApps(ctx context.Context, tenantID string) ([]GhostedAppRow, error) {
+	q := `SELECT ga.name, ga.vendor, ga.category, ga.device_count, ga.risk_level,
+	             ga.duplicates_feature, o.name, o.id::text
+	      FROM system_mgmt.ghosted_apps ga
+	      JOIN system_mgmt.organizations o ON o.id = ga.org_id`
+	args := []interface{}{}
+	if tenantID != "" {
+		q += " WHERE ga.org_id = $1"
+		args = append(args, tenantID)
+	}
+	q += " ORDER BY o.name, ga.device_count DESC"
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []GhostedAppRow{}
+	for rows.Next() {
+		var g GhostedAppRow
+		if err := rows.Scan(&g.Name, &g.Vendor, &g.Category, &g.DeviceCount, &g.RiskLevel,
+			&g.Duplicates, &g.TenantName, &g.TenantID); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 // PolicyDetail is a single policy resolved for the deep-link view (assistant links).
@@ -146,7 +232,7 @@ func (s *TenantStore) GetTenantDetail(ctx context.Context, tenantID string) (*Te
 	if err != nil {
 		return nil, err
 	}
-	detail := &TenantDetail{Summary: summary, RecentBlocks: []TenantLogRow{}, Policies: []TenantPolicyRow{}}
+	detail := &TenantDetail{Summary: summary, RecentBlocks: []TenantLogRow{}, Policies: []TenantPolicyRow{}, GhostedApps: []GhostedAppRow{}}
 
 	logRows, err := s.db.DB.QueryContext(ctx, `
 		SELECT domain, verdict, action, COALESCE(policy_name,''), COALESCE(threat_category,''),
@@ -184,5 +270,14 @@ func (s *TenantStore) GetTenantDetail(ctx context.Context, tenantID string) (*Te
 		}
 		detail.Policies = append(detail.Policies, p)
 	}
-	return detail, polRows.Err()
+	if err := polRows.Err(); err != nil {
+		return nil, err
+	}
+
+	ghosted, err := s.ListGhostedApps(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	detail.GhostedApps = ghosted
+	return detail, nil
 }
