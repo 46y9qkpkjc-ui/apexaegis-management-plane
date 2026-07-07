@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +16,14 @@ import (
 	"github.com/zcp/management-plane/internal/notify"
 	"go.uber.org/zap"
 )
+
+// sesConfigured reports whether SES SMTP credentials are present. When they are
+// not (demo/unconfigured environments), RequestOTP returns the code in the
+// response so the storefront can display it — and automatically switches to
+// email-only delivery the moment the creds are set, with no code change.
+func sesConfigured() bool {
+	return os.Getenv("SES_SMTP_USER") != "" && os.Getenv("SES_SMTP_PASS") != ""
+}
 
 // OnboardHandler serves the public client self-serve onboarding OTP flow.
 // No JWT: access is gated by a one-time passcode emailed to the address the
@@ -84,6 +93,14 @@ func (h *OnboardHandler) RequestOTP(c *gin.Context) {
 	); err != nil {
 		h.logger.Error("onboard otp insert failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not issue passcode"})
+		return
+	}
+
+	// No SES creds → demo mode: return the code so the storefront can show it.
+	if !sesConfigured() {
+		h.logger.Warn("onboard otp: SES not configured, returning code in response (demo mode)",
+			zap.String("email", email))
+		c.JSON(http.StatusOK, gin.H{"ok": true, "demo": true, "code": code})
 		return
 	}
 
