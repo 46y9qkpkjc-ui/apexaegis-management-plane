@@ -328,6 +328,14 @@ func main() {
 		authAPI.POST("/sso/callback", ssoHandler.Callback)
 	}
 
+	// Client self-serve onboarding OTP API (public — no JWT; gated by emailed OTP).
+	onboardAPI := router.Group("/api/v1/onboard")
+	{
+		onboardHandler := handlers.NewOnboardHandler(dbConn, logger)
+		onboardAPI.POST("/otp/request", onboardHandler.RequestOTP)
+		onboardAPI.POST("/otp/verify", onboardHandler.VerifyOTP)
+	}
+
 	// Self-service user portal API (SCIM client-user JWT only).
 	portalAPI := router.Group("/api/v1/portal")
 	portalAPI.Use(middleware.JWTAuth(authStore))

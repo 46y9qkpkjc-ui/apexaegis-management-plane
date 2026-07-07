@@ -61,8 +61,10 @@ func CORS() gin.HandlerFunc {
 
 func allowedWebOrigins() map[string]bool {
 	origins := map[string]bool{
-		"https://www.apexaegis.app": true,
-		"https://apexaegis.app":     true,
+		"https://www.apexaegis.app":        true,
+		"https://apexaegis.app":            true,
+		"https://storefront.apexaegis.app": true,
+		"https://store.apexaegis.app":      true,
 	}
 	if extra := os.Getenv("WEB_UI_ALLOWED_ORIGINS"); extra != "" {
 		for _, origin := range strings.Split(extra, ",") {
@@ -77,6 +79,8 @@ func allowedWebOrigins() map[string]bool {
 		origins["http://127.0.0.1:3000"] = true
 		origins["http://localhost:3001"] = true
 		origins["http://127.0.0.1:3001"] = true
+		origins["http://localhost:3100"] = true
+		origins["http://127.0.0.1:3100"] = true
 	}
 	return origins
 }
