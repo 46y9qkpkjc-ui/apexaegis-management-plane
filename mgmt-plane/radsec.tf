@@ -13,7 +13,7 @@
 
 resource "aws_security_group" "radsec_nlb" {
   name        = "apexaegis-radsec-nlb"
-  description = "RadSec NLB — RADIUS-over-TLS on 443"
+  description = "RadSec NLB - RADIUS-over-TLS on 443"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
