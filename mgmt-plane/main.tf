@@ -633,10 +633,18 @@ resource "aws_ecs_task_definition" "mgmt" {
     image     = local.ecr_image
     essential = true
 
-    portMappings = [{
-      containerPort = 443
-      protocol      = "tcp"
-    }]
+    portMappings = [
+      {
+        containerPort = 443
+        protocol      = "tcp"
+      },
+      {
+        # Cloud RADIUS: RadSec (RADIUS-over-TLS) + EAP-TLS listener, fronted by the
+        # radius NLB (443/TCP passthrough → 2083). See radsec.tf.
+        containerPort = 2083
+        protocol      = "tcp"
+      }
+    ]
 
     environment = [
       { name = "LISTEN_ADDR", value = ":443" },
@@ -673,6 +681,10 @@ resource "aws_ecs_task_definition" "mgmt" {
       # itself rides MP_KRB5_KEYTAB_B64 (SSM SecureString, in secrets below).
       { name = "MP_KRB5_SPN", value = "HTTP/api.apexaegis.app@AD.APEXAEGIS.APP" },
       { name = "MP_KRB5_REALM", value = "AD.APEXAEGIS.APP" },
+      # Cloud RADIUS (RadSec + EAP-TLS) listener address. Cert material rides the
+      # RADSEC_*_PEM secrets below (SSM SecureStrings, out-of-band). With those unset
+      # the RadSec server stays disabled and nothing else is affected.
+      { name = "RADSEC_LISTEN_ADDR", value = ":2083" },
     ]
 
     secrets = [
@@ -724,6 +736,39 @@ resource "aws_ecs_task_definition" "mgmt" {
         # /agent/sso/kerberos returns 503; nothing else is affected.
         name      = "MP_KRB5_KEYTAB_B64"
         valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/kerberos-keytab"
+      },
+      # ── Cloud RADIUS cert material (RadSec + EAP-TLS) ──────────────────────────
+      # SSM SecureStrings, created out-of-band so keys never enter Terraform state
+      # or git. B and D are ONE cert, so the RadSec-server and EAP-server cert/key
+      # env vars point at the SAME two parameters. Minted on the device step-ca
+      # (see apexaegis-agent/deploy/radsec/CERT-DELIVERY.md).
+      {
+        # Cert B/D leaf (radius.apexaegis.app), PEM.
+        name      = "RADSEC_SERVER_CERT_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-cert"
+      },
+      {
+        # Cert B/D private key, PEM (unencrypted).
+        name      = "RADSEC_SERVER_KEY_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-key"
+      },
+      {
+        name      = "RADSEC_EAP_CERT_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-cert"
+      },
+      {
+        name      = "RADSEC_EAP_KEY_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-key"
+      },
+      {
+        # apexaegis-ca.pem (Device Root + RadSec CA) — verifies the proxy Cert A.
+        name      = "RADSEC_CLIENT_CA_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-client-ca"
+      },
+      {
+        # device-ca bundle (Device Root + Intermediate) — verifies the supplicant Cert C.
+        name      = "RADSEC_EAP_CLIENT_CA_PEM"
+        valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-eap-client-ca"
       },
     ]
 
@@ -803,6 +848,10 @@ resource "aws_iam_policy" "ssm_read" {
         "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/deepgram-api-key",
         "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/elevenlabs-api-key",
         "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/kerberos-keytab",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-cert",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-key",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-client-ca",
+        "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-eap-client-ca",
       ]
       }, {
       Effect   = "Allow"
@@ -856,6 +905,13 @@ resource "aws_ecs_service" "mgmt" {
     container_port   = 443
   }
 
+  # Cloud RADIUS (RadSec) — the radius NLB forwards 443/TCP to container port 2083.
+  load_balancer {
+    target_group_arn = aws_lb_target_group.radsec.arn
+    container_name   = "management-plane"
+    container_port   = 2083
+  }
+
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -866,6 +922,7 @@ resource "aws_ecs_service" "mgmt" {
     aws_lb_listener.device_rest_mtls,
     aws_lb_listener.gateway_grpc_mtls,
     aws_lb_listener.connector_mtls,
+    aws_lb_listener.radsec,
     aws_iam_role_policy_attachment.ecs_task_execution,
   ]
 

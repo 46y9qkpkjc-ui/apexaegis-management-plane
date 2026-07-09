@@ -69,7 +69,8 @@ terraform.tfvars.local
 tfplan
 tfplan.json
 tfplan-*
-server
+# Root build artifact only — anchored so it doesn't swallow source under cmd/server/.
+/server
 
 # Secrets
 tls/

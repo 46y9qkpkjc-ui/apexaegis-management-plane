@@ -29,6 +29,7 @@ import (
 	"github.com/zcp/management-plane/internal/auth"
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dot1x"
+	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/gateway"
 	"github.com/zcp/management-plane/internal/grant"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
@@ -216,6 +217,21 @@ func main() {
 
 	// ── Dot1X HTTPS-based authenticator (replaces RADIUS) ──
 	dot1xAuth := dot1x.NewAuthenticator(nil, logger)
+
+	// ── Cloud RADIUS: native RadSec (RADIUS-over-TLS, TCP 2083) + EAP-TLS ──
+	// Terminates the RADIUS/EAP-TLS protocol from an on-prem radsecproxy and
+	// delegates the access decision to the dot1x PDP above. Disabled unless the
+	// RadSec/EAP cert material is configured (RADSEC_*_FILE env).
+	if rscfg, ok := radsec.ConfigFromEnv(); ok {
+		if rs, err := radsec.NewServer(rscfg, &radsecPDP{auth: dot1xAuth}, logger); err != nil {
+			logger.Error("radsec: disabled — cert load failed", zap.Error(err))
+		} else {
+			go rs.Run(ctx)
+			logger.Info("radsec: Cloud RADIUS enabled", zap.String("addr", rscfg.ListenAddr))
+		}
+	} else {
+		logger.Info("radsec: Cloud RADIUS disabled (set RADSEC_*_FILE env to enable)")
+	}
 
 	// ── Advanced Security Group Tags (SGT) with multi-domain context ──
 	sgtStore := segment.NewStore(logger)
