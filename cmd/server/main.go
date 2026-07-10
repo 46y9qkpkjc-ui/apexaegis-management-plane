@@ -870,6 +870,11 @@ func main() {
 		tenantAPI.GET("/:id", tenantHandler.GetTenant)
 		tenantAPI.GET("/:id/entitlements", tenantHandler.GetEntitlements)
 	}
+	// Operator rollup for the ApexAegis → operators → tenants partner ladder.
+	operatorAPI := router.Group("/api/v1/admin/operators")
+	operatorAPI.Use(middleware.JWTAuth(authStore))
+	operatorAPI.Use(middleware.RequireWriteAccess())
+	operatorAPI.GET("", tenantHandler.ListOperators)
 	// Subscription tiers (store catalog + billing).
 	tierAPI := router.Group("/api/v1/admin/tiers")
 	tierAPI.Use(middleware.JWTAuth(authStore))

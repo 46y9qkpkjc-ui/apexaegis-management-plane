@@ -33,6 +33,19 @@ func (h *TenantHandler) ListTenants(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tenants": tenants})
 }
 
+// ListOperators returns the operator rollup for the ApexAegis partner ladder:
+// top = ApexAegis (the white-label platform), middle = operators (StarHub,
+// Singtel, ViewQwest, SPtel, M1, Optus, …), bottom = each operator's tenants.
+func (h *TenantHandler) ListOperators(c *gin.Context) {
+	operators, err := h.store.ListOperators(c.Request.Context())
+	if err != nil {
+		h.logger.Error("operator rollup", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load operators"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"platform": "ApexAegis", "operators": operators})
+}
+
 // EmailReport sends a dashboard report (composed client-side) via SES.
 func (h *TenantHandler) EmailReport(c *gin.Context) {
 	var req struct {

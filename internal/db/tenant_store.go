@@ -337,6 +337,43 @@ func (s *TenantStore) ListTenantSummaries(ctx context.Context) ([]TenantSummary,
 	return out, rows.Err()
 }
 
+// OperatorSummary rolls tenants up by their service provider (operator) — the
+// middle tier of the ApexAegis → operators → tenants ladder.
+type OperatorSummary struct {
+	Operator  string `json:"operator"`
+	Tenants   int    `json:"tenants"`
+	Dedicated int    `json:"dedicated"`
+	Shared    int    `json:"shared"`
+	Devices   int64  `json:"devices"`
+}
+
+// ListOperators returns the per-operator rollup for the partner ladder.
+func (s *TenantStore) ListOperators(ctx context.Context) ([]OperatorSummary, error) {
+	rows, err := s.db.DB.QueryContext(ctx, `
+		SELECT COALESCE(NULLIF(operator,''),'ApexAegis (direct)') AS operator,
+		       count(*) AS tenants,
+		       count(*) FILTER (WHERE tenant_type = 'dedicated') AS dedicated,
+		       count(*) FILTER (WHERE tenant_type = 'shared') AS shared,
+		       COALESCE(sum(device_count), 0) AS devices
+		FROM system_mgmt.organizations
+		WHERE status IS NULL OR status != 'deleted'
+		GROUP BY 1
+		ORDER BY tenants DESC, operator`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []OperatorSummary{}
+	for rows.Next() {
+		var o OperatorSummary
+		if err := rows.Scan(&o.Operator, &o.Tenants, &o.Dedicated, &o.Shared, &o.Devices); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 // GetTenantDetail returns one tenant's summary plus recent blocks and policies.
 func (s *TenantStore) GetTenantDetail(ctx context.Context, tenantID string) (*TenantDetail, error) {
 	summary, err := scanTenantSummary(s.db.DB.QueryRowContext(ctx, `
