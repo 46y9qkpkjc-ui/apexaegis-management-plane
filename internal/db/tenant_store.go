@@ -13,6 +13,7 @@ type TenantSummary struct {
 	ID          string `json:"tenant_id"`
 	Name        string `json:"tenant_name"`
 	TenantType  string `json:"tenant_type"`
+	Operator    string `json:"operator"` // service provider that manages the tenant
 	Plan        string `json:"plan"`
 	Region      string `json:"region"`
 	Status      string `json:"status"`
@@ -298,7 +299,7 @@ func NewTenantStore(db *DB, logger *zap.Logger) *TenantStore {
 }
 
 const tenantSummaryCols = `
-	o.id, o.name, o.tenant_type, COALESCE(o.plan,''), COALESCE(o.region,''), COALESCE(o.status,'active'),
+	o.id, o.name, o.tenant_type, COALESCE(o.operator,'ApexAegis (direct)'), COALESCE(o.plan,''), COALESCE(o.region,''), COALESCE(o.status,'active'),
 	(SELECT count(*) FROM system_mgmt.users u          WHERE u.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.client_users c   WHERE c.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.policies p        WHERE p.org_id = o.id::text),
@@ -309,7 +310,7 @@ const tenantSummaryCols = `
 
 func scanTenantSummary(scan func(dest ...any) error) (TenantSummary, error) {
 	var t TenantSummary
-	err := scan(&t.ID, &t.Name, &t.TenantType, &t.Plan, &t.Region, &t.Status,
+	err := scan(&t.ID, &t.Name, &t.TenantType, &t.Operator, &t.Plan, &t.Region, &t.Status,
 		&t.Admins, &t.ClientUsers, &t.Policies, &t.Devices, &t.DNSTotal, &t.DNSBlocked)
 	return t, err
 }
