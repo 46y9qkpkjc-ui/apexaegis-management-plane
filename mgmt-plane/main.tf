@@ -875,6 +875,12 @@ resource "aws_ecs_service" "mgmt" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  # The container needs ~60-90s to boot (migrations + all 5 target-group
+  # listeners incl. RadSec). Without a grace period ECS evaluates ELB health
+  # checks immediately and the deployment circuit breaker rolls back a
+  # still-starting task. Give it room so deploys don't flap.
+  health_check_grace_period_seconds = 300
+
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.ecs_task.id]
