@@ -341,9 +341,17 @@ func (s *AuthStore) IssueTokens(ctx context.Context, u *AuthUser, ipAddr, userAg
 	}, nil
 }
 
+// AgentTokenDomain carries the domain-account attestation for the session the
+// token represents. The gateway uses this to enforce that only domain (Active
+// Directory) users may route traffic. Zero value = non-domain (local) login.
+type AgentTokenDomain struct {
+	DomainJoined bool   // true when the user is signed in with a domain account
+	UPN          string // userPrincipalName (user@domain) when domain-joined
+}
+
 // IssueAgentToken generates a short-lived JWT bound to a registered device
 // certificate. Gateways compare these claims with the verified TLS peer cert.
-func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string) (string, time.Time, error) {
+func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string, domain AgentTokenDomain) (string, time.Time, error) {
 	now := time.Now()
 	expiresAt := now.Add(15 * time.Minute)
 	if deviceID == "" {
@@ -368,6 +376,12 @@ func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, cert
 	// policy (DNS security, etc.). Empty until the device is linked to a user.
 	if len(groups) > 0 {
 		claims["groups"] = groups
+	}
+	// Domain-join attestation: the gateway rejects non-domain sessions. Only
+	// stamp domain_joined=true when the user is a verified domain account.
+	claims["domain_joined"] = domain.DomainJoined
+	if strings.TrimSpace(domain.UPN) != "" {
+		claims["upn"] = domain.UPN
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.jwtSecret)

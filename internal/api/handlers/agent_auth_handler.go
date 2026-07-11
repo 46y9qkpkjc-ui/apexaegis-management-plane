@@ -99,12 +99,17 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		h.logger.Warn("failed to resolve device groups", zap.String("device_id", deviceID), zap.Error(gerr))
 	}
 
+	// Device-certificate auth alone does not prove a domain login, so the token
+	// is issued without a domain attestation. Domain users obtain a
+	// domain_joined token via the Kerberos SSO flow; the gateway also admits
+	// linked domain devices via their UPN / "Domain Users" group.
 	jwt, expiresAt, err := h.authStore.IssueAgentToken(
 		req.TenantID,
 		reg.ID,
 		identity.FingerprintSHA256,
 		identity.Serial,
 		groups,
+		db.AgentTokenDomain{},
 	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))

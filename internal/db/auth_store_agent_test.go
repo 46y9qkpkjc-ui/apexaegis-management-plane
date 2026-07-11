@@ -11,7 +11,8 @@ func TestIssueAgentTokenBindsDeviceCertificate(t *testing.T) {
 	secret := []byte("test-secret")
 	store := NewAuthStore(nil, secret, zap.NewNop())
 
-	tokenString, _, err := store.IssueAgentToken("tenant-1", "device-1", "aabbcc", "1234", []string{"IT Team"})
+	tokenString, _, err := store.IssueAgentToken("tenant-1", "device-1", "aabbcc", "1234", []string{"IT Team"},
+		AgentTokenDomain{DomainJoined: true, UPN: "mark@ad.apexaegis.app"})
 	if err != nil {
 		t.Fatalf("IssueAgentToken failed: %v", err)
 	}
@@ -34,12 +35,18 @@ func TestIssueAgentTokenBindsDeviceCertificate(t *testing.T) {
 	if !ok || len(groups) != 1 || groups[0] != "IT Team" {
 		t.Fatalf("expected groups claim [IT Team], got %v", claims["groups"])
 	}
+	if dj, _ := claims["domain_joined"].(bool); !dj {
+		t.Fatalf("expected domain_joined=true claim, got %v", claims["domain_joined"])
+	}
+	if claims["upn"] != "mark@ad.apexaegis.app" {
+		t.Fatalf("unexpected upn claim: %v", claims["upn"])
+	}
 }
 
 func TestIssueAgentTokenRequiresDeviceCertificate(t *testing.T) {
 	store := NewAuthStore(nil, []byte("test-secret"), zap.NewNop())
 
-	if _, _, err := store.IssueAgentToken("tenant-1", "device-1", "", "", nil); err == nil {
+	if _, _, err := store.IssueAgentToken("tenant-1", "device-1", "", "", nil, AgentTokenDomain{}); err == nil {
 		t.Fatal("expected missing device certificate identity to be rejected")
 	}
 }
