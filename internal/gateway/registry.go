@@ -33,6 +33,45 @@ type GatewayNode struct {
 	LastHeartbeat time.Time         `json:"last_heartbeat"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	RegisteredAt  time.Time         `json:"registered_at"`
+
+	// Data-plane capability advertisement (endpoint SD-WAN / multipath-QUIC). These
+	// are DERIVED from registration Metadata (the gateway self-advertises them), so
+	// they need no schema change. They tell the agent which data plane to speak and
+	// whether it can bond / fall back to TCP, plus the egress IPs to allowlist.
+	DataPlane           string   `json:"data_plane"`             // "ip-over-quic" (legacy) | "stream-proxy"
+	ALPN                string   `json:"alpn,omitempty"`         // e.g. "apexaegis-mpquic"
+	SupportsBonding     bool     `json:"supports_bonding"`       // capacity-aware link aggregation
+	SupportsTCPFallback bool     `json:"supports_tcp_fallback"`  // per-link QUIC→TCP fallback
+	EgressIPs           []string `json:"egress_ips,omitempty"`   // NAT-GW EIPs for customer allowlisting
+}
+
+// applyCapabilitiesFromMetadata derives the typed data-plane capability fields from
+// the gateway's registration Metadata. Legacy gateways (no metadata) default to
+// "ip-over-quic" with no bonding, preserving existing behavior.
+func (n *GatewayNode) applyCapabilitiesFromMetadata() {
+	dp := n.Metadata["data_plane"]
+	if dp == "" {
+		dp = "ip-over-quic"
+	}
+	n.DataPlane = dp
+	n.ALPN = n.Metadata["alpn"]
+	n.SupportsBonding = n.Metadata["supports_bonding"] == "true"
+	n.SupportsTCPFallback = n.Metadata["supports_tcp_fallback"] == "true"
+	n.EgressIPs = splitCSVList(n.Metadata["egress_ips"])
+}
+
+// splitCSVList parses "a, b ,c" → ["a","b","c"], dropping blanks.
+func splitCSVList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Store is the interface the Registry uses for persistence.
@@ -144,6 +183,7 @@ func (r *Registry) LoadFromDB(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, gw := range gateways {
+		gw.applyCapabilitiesFromMetadata() // derive caps for restored nodes (re-derived on next register)
 		r.gateways[gw.ID] = gw
 	}
 	r.logger.Info("Gateway registry restored from DB", zap.Int("count", len(gateways)))
@@ -165,6 +205,7 @@ func (r *Registry) Register(node *GatewayNode) {
 		node.RegisteredAt = time.Now()
 	}
 	node.Status = "online"
+	node.applyCapabilitiesFromMetadata()
 
 	r.gateways[node.ID] = node
 	r.logger.Info("Gateway registered",
