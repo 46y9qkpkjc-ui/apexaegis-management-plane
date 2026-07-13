@@ -278,6 +278,25 @@ func (s *DeviceStore) SaveClientLogs(ctx context.Context, orgID, deviceID string
 	return nil
 }
 
+// LatestComplianceForDevice returns the compliance verdict from the device's most
+// recent posture report, for stamping the agent token (ZTNA posture gate). No report
+// yet => (false, "unknown", nil) — an un-attested device is not treated as compliant.
+func (s *DeviceStore) LatestComplianceForDevice(ctx context.Context, orgID, deviceID string) (bool, string, error) {
+	var compliant bool
+	err := s.db.QueryRowContext(ctx, `SELECT compliant FROM system_mgmt.device_posture_reports
+		WHERE org_id=$1 AND device_id=$2 ORDER BY checked_at DESC LIMIT 1`, orgID, deviceID).Scan(&compliant)
+	if err == sql.ErrNoRows {
+		return false, "unknown", nil
+	}
+	if err != nil {
+		return false, "unknown", err
+	}
+	if compliant {
+		return true, "compliant", nil
+	}
+	return false, "non_compliant", nil
+}
+
 func (s *DeviceStore) GetDeviceDetail(ctx context.Context, orgID, deviceID string) (*DeviceDetail, error) {
 	devices, err := s.ListDevices(ctx, orgID, "", 500)
 	if err != nil {

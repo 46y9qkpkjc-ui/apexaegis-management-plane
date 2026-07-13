@@ -349,9 +349,17 @@ type AgentTokenDomain struct {
 	UPN          string // userPrincipalName (user@domain) when domain-joined
 }
 
+// AgentTokenPosture is the device's compliance attestation stamped into the token so
+// the gateway can enforce a posture-admission gate (ZTNA: grant only if compliant).
+// Sourced from the device's latest posture report (osquery signals feed this).
+type AgentTokenPosture struct {
+	Compliant bool
+	Status    string // "compliant" | "non_compliant" | "unknown"
+}
+
 // IssueAgentToken generates a short-lived JWT bound to a registered device
 // certificate. Gateways compare these claims with the verified TLS peer cert.
-func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string, domain AgentTokenDomain) (string, time.Time, error) {
+func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string, domain AgentTokenDomain, posture AgentTokenPosture) (string, time.Time, error) {
 	now := time.Now()
 	expiresAt := now.Add(15 * time.Minute)
 	if deviceID == "" {
@@ -382,6 +390,12 @@ func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, cert
 	claims["domain_joined"] = domain.DomainJoined
 	if strings.TrimSpace(domain.UPN) != "" {
 		claims["upn"] = domain.UPN
+	}
+	// Device compliance attestation (ZTNA posture gate). The gateway rejects
+	// non-compliant sessions when REQUIRE_COMPLIANT is on.
+	claims["compliant"] = posture.Compliant
+	if strings.TrimSpace(posture.Status) != "" {
+		claims["compliance_status"] = posture.Status
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.jwtSecret)

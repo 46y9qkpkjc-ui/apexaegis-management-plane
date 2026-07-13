@@ -412,6 +412,29 @@ func deviceCertificateIdentity(req *http.Request) *deviceMTLSIdentity {
 	return &deviceMTLSIdentity{subject: subject, serial: serial, fingerprint: fingerprint}
 }
 
+// DeviceLeafCertificate returns the device's verified leaf certificate from the
+// request — the direct mTLS peer cert, or the ALB X-Amzn-Mtls-Clientcert-Leaf
+// passthrough. Used to verify the attestation signature on a posture report against
+// the device's public key. Returns nil if no client cert is present.
+func DeviceLeafCertificate(req *http.Request) *x509.Certificate {
+	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
+		return req.TLS.PeerCertificates[0]
+	}
+	leaf := decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert-Leaf"))
+	if leaf == "" {
+		leaf = decodeMTLSHeader(req.Header.Get("X-Amzn-Mtls-Clientcert"))
+	}
+	if leaf == "" {
+		return nil
+	}
+	if block, _ := pem.Decode([]byte(leaf)); block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			return cert
+		}
+	}
+	return nil
+}
+
 func decodeMTLSHeader(value string) string {
 	if value == "" {
 		return ""

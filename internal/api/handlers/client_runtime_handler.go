@@ -1,15 +1,21 @@
 package handlers
 
 import (
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zcp/management-plane/internal/api/middleware"
 	"github.com/zcp/management-plane/internal/db"
 	"go.uber.org/zap"
 )
@@ -19,10 +25,41 @@ type ClientRuntimeHandler struct {
 	clientConfigStore *db.ClientConfigStore
 	deviceStore       *db.DeviceStore
 	logger            *zap.Logger
+	// requireAttestation rejects posture reports without a valid device-key
+	// signature (POSTURE_REQUIRE_ATTESTATION=true). Off by default so unsigned
+	// clients keep working during rollout; a present-but-invalid signature is
+	// ALWAYS rejected regardless.
+	requireAttestation bool
 }
 
 func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, logger *zap.Logger) *ClientRuntimeHandler {
-	return &ClientRuntimeHandler{clientConfigStore: clientConfigStore, deviceStore: deviceStore, logger: logger}
+	return &ClientRuntimeHandler{
+		clientConfigStore:  clientConfigStore,
+		deviceStore:        deviceStore,
+		logger:             logger,
+		requireAttestation: os.Getenv("POSTURE_REQUIRE_ATTESTATION") == "true",
+	}
+}
+
+// verifyPostureAttestation verifies the X-Posture-Signature header (base64) as a
+// detached signature over the EXACT raw report body, made by the device's private
+// key (TPM) — checked against the device certificate's public key. This proves the
+// report was produced by the attested device and not tampered/forged in transit.
+func verifyPostureAttestation(cert *x509.Certificate, body []byte, sigB64 string) error {
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if err != nil {
+		return fmt.Errorf("bad signature encoding: %w", err)
+	}
+	var algo x509.SignatureAlgorithm
+	switch cert.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		algo = x509.ECDSAWithSHA256 // device CA is EC P-256; ASN.1 DER signature
+	case *rsa.PublicKey:
+		algo = x509.SHA256WithRSA
+	default:
+		return fmt.Errorf("unsupported device key type %T", cert.PublicKey)
+	}
+	return cert.CheckSignature(algo, body, sig)
 }
 
 type runtimeClientProfile struct {
@@ -228,12 +265,45 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
 		return
 	}
+	// Read the EXACT bytes so the attestation signature verifies over what the
+	// device actually signed (a re-marshal would reorder keys and break it).
+	raw, rerr := c.GetRawData()
+	if rerr != nil || len(raw) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty posture report"})
+		return
+	}
+
+	// Attestation: verify the device-key signature over the raw body (TPM-anchored,
+	// works work-from-anywhere). A present-but-invalid signature is a tamper → reject.
+	// Absent is allowed unless POSTURE_REQUIRE_ATTESTATION is on.
+	sigB64 := c.GetHeader("X-Posture-Signature")
+	attested := false
+	if sigB64 != "" {
+		cert := middleware.DeviceLeafCertificate(c.Request)
+		if cert == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "device certificate unavailable for attestation"})
+			return
+		}
+		if verr := verifyPostureAttestation(cert, raw, sigB64); verr != nil {
+			h.logger.Warn("posture attestation signature invalid",
+				zap.String("device_id", deviceID), zap.Error(verr))
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "posture attestation failed"})
+			return
+		}
+		attested = true
+	} else if h.requireAttestation {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "signed posture report required"})
+		return
+	}
+
 	var request postureRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
+	if err := json.Unmarshal(raw, &request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid posture report"})
 		return
 	}
-	raw, _ := json.Marshal(request)
+	if !attested {
+		h.logger.Info("posture report accepted UNATTESTED (no signature)", zap.String("device_id", deviceID))
+	}
 	err := h.deviceStore.SavePostureReport(c.Request.Context(), orgID, deviceID, db.DevicePostureReport{
 		CheckedAt: request.CheckedAt, Compliant: request.Compliant, Score: request.Score,
 		DiskEncrypted: request.DiskEncrypted, FirewallEnabled: request.FirewallEnabled,

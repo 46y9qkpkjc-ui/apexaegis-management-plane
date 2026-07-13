@@ -103,6 +103,12 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 	// is issued without a domain attestation. Domain users obtain a
 	// domain_joined token via the Kerberos SSO flow; the gateway also admits
 	// linked domain devices via their UPN / "Domain Users" group.
+	// Device compliance from its latest posture report → stamped into the token so
+	// the gateway can enforce a posture-admission gate (ZTNA).
+	compliant, complianceStatus, cerr := h.deviceStore.LatestComplianceForDevice(c.Request.Context(), req.TenantID, reg.ID)
+	if cerr != nil {
+		h.logger.Warn("failed to resolve device compliance", zap.String("device_id", deviceID), zap.Error(cerr))
+	}
 	jwt, expiresAt, err := h.authStore.IssueAgentToken(
 		req.TenantID,
 		reg.ID,
@@ -110,6 +116,7 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		identity.Serial,
 		groups,
 		db.AgentTokenDomain{},
+		db.AgentTokenPosture{Compliant: compliant, Status: complianceStatus},
 	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))

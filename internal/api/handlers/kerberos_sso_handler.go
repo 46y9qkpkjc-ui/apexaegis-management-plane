@@ -153,9 +153,14 @@ func (h *KerberosSSOHandler) Authenticate(c *gin.Context) {
 		h.logger.Warn("kerberos sso: group resolution failed", zap.String("device_id", req.DeviceID), zap.Error(gerr))
 	}
 	// Kerberos SSO proves a domain login — stamp the domain attestation so the
-	// gateway admits this session.
+	// gateway admits this session. Also stamp the device's compliance verdict.
+	compliant, complianceStatus, cerr := h.devices.LatestComplianceForDevice(c.Request.Context(), req.TenantID, reg.ID)
+	if cerr != nil {
+		h.logger.Warn("kerberos sso: compliance lookup failed", zap.String("device_id", req.DeviceID), zap.Error(cerr))
+	}
 	jwt, expiresAt, err := h.auth.IssueAgentToken(req.TenantID, reg.ID, identity.FingerprintSHA256, identity.Serial, groups,
-		db.AgentTokenDomain{DomainJoined: true, UPN: kid.Principal})
+		db.AgentTokenDomain{DomainJoined: true, UPN: kid.Principal},
+		db.AgentTokenPosture{Compliant: compliant, Status: complianceStatus})
 	if err != nil {
 		h.logger.Error("kerberos sso: token issuance failed", zap.String("device_id", req.DeviceID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
