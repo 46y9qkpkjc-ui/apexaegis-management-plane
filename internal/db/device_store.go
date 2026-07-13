@@ -278,6 +278,61 @@ func (s *DeviceStore) SaveClientLogs(ctx context.Context, orgID, deviceID string
 	return nil
 }
 
+// GetIntegrityBaseline returns the device's accepted FIM baseline (path → hash), and
+// whether one has been established yet.
+func (s *DeviceStore) GetIntegrityBaseline(ctx context.Context, orgID, deviceID string) (map[string]string, bool, error) {
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot FROM system_mgmt.device_integrity_baseline
+		WHERE org_id=$1 AND device_id=$2`, orgID, deviceID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, false, err
+	}
+	return m, true, nil
+}
+
+// SetIntegrityBaseline establishes/replaces the device's FIM baseline (admin re-baseline
+// after a legitimate change goes through here too).
+func (s *DeviceStore) SetIntegrityBaseline(ctx context.Context, orgID, deviceID string, snapshot map[string]string) error {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_mgmt.device_integrity_baseline
+		(org_id, device_id, snapshot, established_at, updated_at) VALUES ($1,$2,$3,now(),now())
+		ON CONFLICT (org_id, device_id) DO UPDATE SET snapshot=EXCLUDED.snapshot, updated_at=now()`,
+		orgID, deviceID, raw)
+	return err
+}
+
+// IntegrityDiff compares a current FIM snapshot against the baseline.
+//   - modified: path present in both but the hash changed (tamper / update)
+//   - removed:  path in the baseline but missing now (deleted / hidden)
+//   - added:    new path not in the baseline
+//
+// modified + removed are the tamper signals that downgrade compliance.
+func IntegrityDiff(baseline, current map[string]string) (modified, added, removed []string) {
+	for path, h := range current {
+		if b, ok := baseline[path]; !ok {
+			added = append(added, path)
+		} else if b != h {
+			modified = append(modified, path)
+		}
+	}
+	for path := range baseline {
+		if _, ok := current[path]; !ok {
+			removed = append(removed, path)
+		}
+	}
+	return modified, added, removed
+}
+
 // LatestComplianceForDevice returns the compliance verdict from the device's most
 // recent posture report, for stamping the agent token (ZTNA posture gate). No report
 // yet => (false, "unknown", nil) — an un-attested device is not treated as compliant.

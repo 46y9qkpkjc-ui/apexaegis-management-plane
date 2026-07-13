@@ -257,6 +257,9 @@ type postureRequest struct {
 	GhostAppCount     int                      `json:"ghost_app_count,omitempty"`
 	HighRiskAppCount  int                      `json:"high_risk_app_count,omitempty"`
 	ApplicationScanAt *time.Time               `json:"application_scan_at,omitempty"`
+	// Integrity is the FIM snapshot: monitored path/registry-key → sha256 hex. The
+	// MP baselines it (first attested report) and diffs later snapshots for tamper.
+	Integrity map[string]string `json:"integrity,omitempty"`
 }
 
 func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
@@ -304,8 +307,38 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 	if !attested {
 		h.logger.Info("posture report accepted UNATTESTED (no signature)", zap.String("device_id", deviceID))
 	}
+
+	// FIM tamper detection: baseline on the first ATTESTED snapshot, else diff. A
+	// modified/removed monitored path downgrades the MP's authoritative compliance
+	// verdict (raw keeps the client's original claim). Admin re-baseline after a
+	// legitimate change is via SetIntegrityBaseline.
+	effectiveCompliant := request.Compliant
+	if len(request.Integrity) > 0 {
+		baseline, has, berr := h.deviceStore.GetIntegrityBaseline(c.Request.Context(), orgID, deviceID)
+		switch {
+		case berr != nil:
+			h.logger.Warn("integrity baseline lookup failed", zap.String("device_id", deviceID), zap.Error(berr))
+		case !has:
+			if attested { // only an attested snapshot is trustworthy as the baseline
+				if serr := h.deviceStore.SetIntegrityBaseline(c.Request.Context(), orgID, deviceID, request.Integrity); serr != nil {
+					h.logger.Warn("failed to establish integrity baseline", zap.String("device_id", deviceID), zap.Error(serr))
+				} else {
+					h.logger.Info("integrity baseline established", zap.String("device_id", deviceID), zap.Int("paths", len(request.Integrity)))
+				}
+			}
+		default:
+			modified, _, removed := db.IntegrityDiff(baseline, request.Integrity)
+			if len(modified) > 0 || len(removed) > 0 {
+				effectiveCompliant = false
+				h.logger.Warn("FIM integrity drift — compliance downgraded",
+					zap.String("device_id", deviceID),
+					zap.Strings("modified", modified), zap.Strings("removed", removed))
+			}
+		}
+	}
+
 	err := h.deviceStore.SavePostureReport(c.Request.Context(), orgID, deviceID, db.DevicePostureReport{
-		CheckedAt: request.CheckedAt, Compliant: request.Compliant, Score: request.Score,
+		CheckedAt: request.CheckedAt, Compliant: effectiveCompliant, Score: request.Score,
 		DiskEncrypted: request.DiskEncrypted, FirewallEnabled: request.FirewallEnabled,
 		AntivirusRunning: request.AntivirusRunning, AntivirusName: request.AntivirusName,
 		OSVersion: request.OSVersion, Raw: raw,
