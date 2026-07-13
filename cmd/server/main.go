@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -32,6 +33,7 @@ import (
 	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/gateway"
 	"github.com/zcp/management-plane/internal/grant"
+	"github.com/zcp/management-plane/internal/posture"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
@@ -117,6 +119,11 @@ func main() {
 	profileStore := db.NewProfileStore(dbConn)
 	deviceStore := db.NewDeviceStore(dbConn, logger)
 	urlCategoryStore := db.NewURLCategoryStore(dbConn, logger)
+
+	// EDR/MDM posture connectors — consume an existing EDR's device-health verdict
+	// into the posture pipeline (we complement EDR, we don't ship a sensor). Off
+	// unless credentials are set; the runner no-ops with no enabled connectors.
+	startPostureConnectors(ctx, deviceStore, db.NewTenantStore(dbConn, logger), logger)
 	policyObjectStore := db.NewPolicyObjectStore(dbConn, logger)
 	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
 
@@ -1220,6 +1227,46 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// startPostureConnectors wires optional EDR/MDM posture connectors (env-gated) and
+// runs them in the background. Each external verdict is written as a
+// device_posture_report, so the compliance claim + gateway gate act on it exactly
+// like a self-reported one. No-op unless credentials are configured.
+func startPostureConnectors(ctx context.Context, devices *db.DeviceStore, tenants *db.TenantStore, logger *zap.Logger) {
+	var connectors []posture.Connector
+	if os.Getenv("CROWDSTRIKE_CLIENT_ID") != "" {
+		cs := posture.NewCrowdStrikeZTA(posture.CrowdStrikeConfig{
+			ClientID:     os.Getenv("CROWDSTRIKE_CLIENT_ID"),
+			ClientSecret: os.Getenv("CROWDSTRIKE_CLIENT_SECRET"),
+			BaseURL:      os.Getenv("CROWDSTRIKE_BASE_URL"),
+		}, logger)
+		if cs.Enabled() {
+			connectors = append(connectors, cs)
+		}
+	}
+	if len(connectors) == 0 {
+		return
+	}
+	save := func(ctx context.Context, orgID string, v posture.Verdict) error {
+		raw, _ := json.Marshal(map[string]any{"source": v.Source, "score": v.Score, "signals": v.Signals})
+		return devices.SavePostureReport(ctx, orgID, v.DeviceID, db.DevicePostureReport{
+			CheckedAt: time.Now(), Compliant: v.Compliant, Score: v.Score,
+			AntivirusName: v.Source, Raw: raw,
+		})
+	}
+	orgs := func(ctx context.Context) ([]string, error) {
+		summaries, err := tenants.ListTenantSummaries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(summaries))
+		for _, s := range summaries {
+			ids = append(ids, s.ID)
+		}
+		return ids, nil
+	}
+	go posture.NewRunner(save, orgs, 5*time.Minute, logger, connectors...).Run(ctx)
 }
 
 func newLogger() (*zap.Logger, error) {
