@@ -324,6 +324,18 @@ resource "aws_security_group" "ecs_task" {
     description     = "Traffic from ALB only"
   }
 
+  # RadSec (RADIUS-over-TLS) container port, reachable only from the RadSec NLB's
+  # SG. Managed inline (not via a separate aws_security_group_rule) so it doesn't
+  # fight this resource's inline ingress set — mixing the two caused perpetual
+  # drift where every apply stripped this rule. See radsec.tf.
+  ingress {
+    from_port       = 2083
+    to_port         = 2083
+    protocol        = "tcp"
+    security_groups = [aws_security_group.radsec_nlb.id]
+    description     = "RadSec from the radius NLB"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

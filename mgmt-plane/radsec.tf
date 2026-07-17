@@ -81,17 +81,17 @@ resource "aws_lb_listener" "radsec" {
   }
 }
 
-# Allow the RadSec container port from the NLB only (NLB has a security group, so
-# the task SG can reference it even with client-IP preservation on).
-resource "aws_security_group_rule" "ecs_task_radsec" {
-  type                     = "ingress"
-  from_port                = 2083
-  to_port                  = 2083
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.ecs_task.id
-  source_security_group_id = aws_security_group.radsec_nlb.id
-  description              = "RadSec from the radius NLB"
-}
+# Allow the RadSec container port (2083) from the NLB only. This lives INLINE on
+# aws_security_group.ecs_task (see main.tf), not as a separate
+# aws_security_group_rule: aws_security_group.ecs_task already declares its ingress
+# inline, and mixing an inline set with a standalone rule made every `terraform
+# apply` try to strip this rule (the inline set didn't know about it) while the
+# standalone rule re-added it — perpetual drift. Codified inline resolves that.
+#
+# Migration note (one-time, when moving an existing state to this layout):
+#   terraform state rm aws_security_group_rule.ecs_task_radsec
+# so Terraform stops tracking the old standalone rule without deleting the live
+# 2083 rule (now owned by the inline block).
 
 output "radsec_nlb_dns" {
   description = "Point radius.apexaegis.app (DNS-only, NOT Cloudflare-proxied) at this NLB"
