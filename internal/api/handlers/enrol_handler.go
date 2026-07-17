@@ -60,7 +60,11 @@ func (h *EnrolHandler) Enroll(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "invalid organization or enrolment secret"})
 		return
 	}
-	tok, err := h.ca.MintEnrolToken(c.Request.Context(), req.DeviceID)
+	// Pass the SECRET-VALIDATED org, never a caller-asserted one: the token's org
+	// claim is what the CA pins the cert's Organization from, and RADIUS reads the
+	// tenant out of that O. req.OrgID is only trusted here because Validate above
+	// proved the caller holds that org's enrolment secret.
+	tok, err := h.ca.MintEnrolToken(c.Request.Context(), req.DeviceID, req.OrgID)
 	if err != nil {
 		h.logger.Error("mint enrol token", zap.Error(err), zap.String("org_id", req.OrgID))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mint enrolment token"})

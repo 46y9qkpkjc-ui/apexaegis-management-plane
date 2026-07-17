@@ -134,7 +134,7 @@ func (s *StepCADeviceCA) IssueDeviceCertificate(ctx context.Context, csrPEM, org
 		validDays = 397
 	}
 
-	ott, err := s.mintToken(ctx, deviceID)
+	ott, err := s.mintToken(ctx, deviceID, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -176,12 +176,20 @@ type EnrolToken struct {
 // MintEnrolToken mints a one-time, short-lived (5 min) enrolment token for the
 // given device subject (CN/hostname) using the configured JWK provisioner. The
 // agent uses it to obtain its cert directly from the CA; the MP never sees the key.
-func (s *StepCADeviceCA) MintEnrolToken(ctx context.Context, subject string) (*EnrolToken, error) {
+//
+// orgID is REQUIRED and is stamped into the token's `org` claim: the CA's leaf
+// template pins the certificate's Organization from that claim rather than from
+// the client's CSR. Without it the caller could self-assign any tenant (RADIUS
+// reads the tenant from the cert's O), so an empty orgID is rejected.
+func (s *StepCADeviceCA) MintEnrolToken(ctx context.Context, subject, orgID string) (*EnrolToken, error) {
 	subject = strings.TrimSpace(subject)
 	if subject == "" {
 		return nil, errors.New("subject (device id) is required")
 	}
-	tok, err := s.mintToken(ctx, subject)
+	if strings.TrimSpace(orgID) == "" {
+		return nil, errors.New("org id is required")
+	}
+	tok, err := s.mintToken(ctx, subject, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +204,13 @@ func (s *StepCADeviceCA) MintEnrolToken(ctx context.Context, subject string) (*E
 }
 
 // mintToken builds + signs a one-time JWK-provisioner token for the device identity.
-func (s *StepCADeviceCA) mintToken(ctx context.Context, deviceID string) (string, error) {
+//
+// The `org` claim is the tenant binding. step-ca constrains the leaf's CN (to
+// `sub`) and SANs (to `sans`), but NOT the Subject Organization — the leaf
+// template must therefore source O from this claim. Emitting it here is what
+// lets the CA stop trusting `.Insecure.CR.Subject.Organization` (the CSR), which
+// the client controls and RADIUS trusts as the tenant.
+func (s *StepCADeviceCA) mintToken(ctx context.Context, deviceID, orgID string) (string, error) {
 	priv, kid, err := s.provisionerKey(ctx)
 	if err != nil {
 		return "", err
@@ -214,6 +228,7 @@ func (s *StepCADeviceCA) mintToken(ctx context.Context, deviceID string) (string
 		"jti":  hex.EncodeToString(jti),
 		"sha":  s.fingerprint,
 		"sans": []string{deviceID},
+		"org":  orgID,
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	tok.Header["kid"] = kid
