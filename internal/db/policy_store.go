@@ -406,7 +406,7 @@ func (s *PolicyStore) listUnlocked() []policy.SecurityPolicy {
 		        web_filter_enabled, web_block_categories, web_allow_categories,
 		        web_custom_blocklist, web_custom_allowlist, web_safe_search, web_block_uncategorized,
 		        cloud_tenant_restrict, cloud_allowed_tenants,
-		        log_traffic, log_security_events
+		        log_traffic, log_security_events, source_device_posture
 		 FROM system_mgmt.policies ORDER BY sequence`)
 	if err != nil {
 		return nil
