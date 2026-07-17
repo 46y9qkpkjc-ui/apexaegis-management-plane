@@ -28,6 +28,13 @@ type DeviceCertificateIssuer interface {
 	IssueDeviceCertificate(ctx context.Context, csrPEM, orgID, deviceID string, validDays int) (*IssuedDeviceCertificate, error)
 }
 
+// EnrolTokenMinter mints a short-lived step-ca token the holder redeems directly
+// at the CA, keeping its private key on the device. Narrow on purpose: callers
+// must supply the org, which becomes the token's tenant binding.
+type EnrolTokenMinter interface {
+	MintEnrolToken(ctx context.Context, subject, orgID string) (*EnrolToken, error)
+}
+
 // StepCADeviceCA issues device client certs by signing CSRs with the device
 // step-ca (device-ca.apexaegis.app) through the "portal" JWK provisioner — the
 // replacement for AWS Private CA. It only makes outbound HTTPS calls to the CA.

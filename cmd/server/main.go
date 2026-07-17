@@ -30,14 +30,14 @@ import (
 	"github.com/zcp/management-plane/internal/auth"
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dot1x"
-	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/gateway"
 	"github.com/zcp/management-plane/internal/grant"
-	"github.com/zcp/management-plane/internal/posture"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
 	"github.com/zcp/management-plane/internal/policy"
+	"github.com/zcp/management-plane/internal/posture"
+	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/scanner"
 	"github.com/zcp/management-plane/internal/sdn"
 	"github.com/zcp/management-plane/internal/security"
@@ -364,10 +364,18 @@ func main() {
 	portalAPI.Use(middleware.JWTAuth(authStore))
 	portalAPI.Use(middleware.RequireRole("client_user"))
 	{
-		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, deviceCA, logger)
+		// enrolCA (the concrete step-ca client) also mints BYOD tokens; it's nil when
+		// the device step-ca isn't configured, and the handler 503s in that case.
+		var byodMinter security.EnrolTokenMinter
+		if enrolCA != nil {
+			byodMinter = enrolCA
+		}
+		portalHandler := handlers.NewPortalHandler(scimStore, deviceStore, deviceCA, byodMinter, logger)
 		portalAPI.GET("/profile", portalHandler.Profile)
 		portalAPI.GET("/artifacts", portalHandler.Artifacts)
 		portalAPI.POST("/devices/certificates", portalHandler.IssueDeviceCertificate)
+		// BYOD onboarding: user-scoped step-ca token, identity from the SSO session.
+		portalAPI.POST("/byod/token", portalHandler.IssueBYODToken)
 	}
 
 	// AD-sync connector API (outbound-only; Infra-CA mTLS enforced in the handler
