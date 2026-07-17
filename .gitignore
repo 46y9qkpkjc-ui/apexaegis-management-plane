@@ -77,3 +77,7 @@ tls/
 keys/
 .env
 .env.local
+
+# terraform plan artifacts
+*.plan
+mgmt-plane/*.plan
