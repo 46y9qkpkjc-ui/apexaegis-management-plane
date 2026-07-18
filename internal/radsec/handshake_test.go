@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
-	"net"
 	"testing"
 	"time"
 
@@ -44,7 +43,8 @@ func TestEAPTLSHandshakeEndToEnd(t *testing.T) {
 		logger:   zap.NewNop(),
 		pdp:      pdp,
 		sessions: make(map[string]*session),
-		live:     make(map[string]net.Conn),
+		live:     make(map[string]*liveSession),
+		pending:  make(map[byte]chan *packet),
 		innerCfg: &tls.Config{
 			Certificates: []tls.Certificate{eapCert},
 			ClientAuth:   tls.RequireAndVerifyClientCert,

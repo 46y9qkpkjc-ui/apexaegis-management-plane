@@ -229,11 +229,16 @@ func main() {
 	// Terminates the RADIUS/EAP-TLS protocol from an on-prem radsecproxy and
 	// delegates the access decision to the dot1x PDP above. Disabled unless the
 	// RadSec/EAP cert material is configured (RADSEC_*_FILE env).
+	// sessionEnforcer is the network-plane kill switch (RFC 5176 CoA/Disconnect
+	// over RadSec). nil unless RadSec is configured; the dot1x handler falls back
+	// to an in-memory flip when it's nil.
+	var sessionEnforcer handlers.SessionEnforcer
 	if rscfg, ok := radsec.ConfigFromEnv(); ok {
 		if rs, err := radsec.NewServer(rscfg, &radsecPDP{auth: dot1xAuth}, logger); err != nil {
 			logger.Error("radsec: disabled — cert load failed", zap.Error(err))
 		} else {
 			go rs.Run(ctx)
+			sessionEnforcer = radsecEnforcer{rs: rs}
 			logger.Info("radsec: Cloud RADIUS enabled", zap.String("addr", rscfg.ListenAddr))
 		}
 	} else {
@@ -790,13 +795,14 @@ func main() {
 	dot1xAPI := router.Group("/api/v1/dot1x")
 	dot1xAPI.Use(middleware.GatewayAuth(gwRegistry))
 	{
-		dot1xHandler := handlers.NewDot1XHandler(dot1xAuth, auditLog, logger)
+		dot1xHandler := handlers.NewDot1XHandler(dot1xAuth, sessionEnforcer, auditLog, logger)
 		dot1xAPI.POST("/authenticate", dot1xHandler.Authenticate)
 		dot1xAPI.POST("/authorize", dot1xHandler.Authorize)
 		dot1xAPI.POST("/accounting", dot1xHandler.Accounting)
 		dot1xAPI.GET("/sessions", dot1xHandler.ListSessions)
 		dot1xAPI.GET("/sessions/:id", dot1xHandler.GetSession)
 		dot1xAPI.POST("/sessions/:id/disconnect", dot1xHandler.DisconnectSession)
+		dot1xAPI.POST("/sessions/:id/quarantine", dot1xHandler.QuarantineSession)
 		dot1xAPI.POST("/mac/register", dot1xHandler.RegisterMAC)
 		dot1xAPI.DELETE("/mac/:mac", dot1xHandler.RemoveMAC)
 		dot1xAPI.GET("/mac", dot1xHandler.ListMACs)

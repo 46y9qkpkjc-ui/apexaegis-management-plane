@@ -53,7 +53,7 @@ type Config struct {
 
 	// Cert D — EAP-TLS server cert presented to the supplicant.
 	EAPCertFile, EAPKeyFile string
-	EAPCertPEM, EAPKeyPEM    string
+	EAPCertPEM, EAPKeyPEM   string
 	// device-ca bundle (Root+Intermediate) to verify the supplicant cert (Cert C).
 	EAPClientCAFile, EAPClientCAPEM string
 }
@@ -105,9 +105,27 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*session // State token -> conversation
 
-	// live maps a device (by Acct-Session / username) to its proxy conn for
-	// best-effort server-initiated CoA/Disconnect over the same RadSec link.
-	live map[string]net.Conn
+	// live maps an authenticated session to the proxy conn it arrived on plus the
+	// attributes needed to identify it at the NAS, so the server can initiate a
+	// Dynamic Authorization exchange (RFC 5176 CoA/Disconnect) over the same RadSec
+	// link — the enforcement kill switch.
+	live map[string]*liveSession
+
+	// pending correlates a server-initiated CoA/Disconnect-Request with its
+	// ACK/NAK response by RADIUS Identifier: handleConn delivers the response to
+	// the waiting caller's channel. daID hands out the 1-byte Identifiers.
+	pending map[byte]chan *packet
+	daID    byte
+}
+
+// liveSession is a NAS session the server can act on. It holds the RadSec conn to
+// reach the NAS and the RFC 5176 session-identification attributes.
+type liveSession struct {
+	conn             net.Conn
+	acctSessionID    string
+	callingStationID string // supplicant MAC
+	userName         string
+	nasIdentifier    string
 }
 
 // NewServer loads cert material and builds the server. Returns an error if any
@@ -135,7 +153,8 @@ func NewServer(cfg Config, pdp PolicyEngine, logger *zap.Logger) (*Server, error
 		pdp:      pdp,
 		logger:   logger,
 		sessions: make(map[string]*session),
-		live:     make(map[string]net.Conn),
+		live:     make(map[string]*liveSession),
+		pending:  make(map[byte]chan *packet),
 		outerCfg: &tls.Config{
 			Certificates: []tls.Certificate{serverCert},
 			ClientAuth:   tls.RequireAndVerifyClientCert,
@@ -244,8 +263,22 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			s.logger.Warn("radsec: bad RADIUS packet", zap.Error(err))
 			continue
 		}
+		// CoA/Disconnect ACK/NAK are responses to a request WE initiated — route
+		// them to the waiting caller by Identifier rather than dropping them.
+		switch p.Code {
+		case codeDisconnectACK, codeDisconnectNAK, codeCoAACK, codeCoANAK:
+			s.mu.Lock()
+			ch := s.pending[p.Identifier]
+			s.mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- p:
+				default:
+				}
+			}
+			continue
+		}
 		if p.Code != codeAccessRequest {
-			// This server only fields Access-Requests (and initiates CoA itself).
 			continue
 		}
 		if !p.verifyMessageAuthenticator(raw) {
@@ -287,11 +320,11 @@ func readRADIUS(r io.Reader) ([]byte, error) {
 type session struct {
 	id             string
 	es             *eapSession
-	eapID          byte     // last EAP Identifier we issued
-	reassembly     []byte   // inbound EAP-TLS fragments being reassembled
-	outFrags       []byte   // outbound TLS message being fragmented
-	outOffset      int      // next offset into outFrags
-	hsComplete     bool     // inner TLS handshake finished; awaiting final peer ACK
+	eapID          byte   // last EAP Identifier we issued
+	reassembly     []byte // inbound EAP-TLS fragments being reassembled
+	outFrags       []byte // outbound TLS message being fragmented
+	outOffset      int    // next offset into outFrags
+	hsComplete     bool   // inner TLS handshake finished; awaiting final peer ACK
 	nasIdentifier  string
 	callingStation string
 	orgID          string
@@ -500,10 +533,19 @@ func (s *Server) finish(conn net.Conn, p *packet, sess *session) []byte {
 		s.logger.Warn("radsec: MPPE key encode failed", zap.Error(err))
 	}
 
-	// Track the session for best-effort CoA over this proxy connection.
-	if acct := string(p.first(attrAcctSessionID)); acct != "" {
+	// Track the session so a later risk signal can drive a CoA/Disconnect over
+	// this proxy connection. Key by the device CN (always present, stable across
+	// the session); record the RFC 5176 identification attributes for the request.
+	sessKey := deviceCert.Subject.CommonName
+	if sessKey != "" {
 		s.mu.Lock()
-		s.live[acct] = conn
+		s.live[sessKey] = &liveSession{
+			conn:             conn,
+			acctSessionID:    string(p.first(attrAcctSessionID)),
+			callingStationID: string(p.first(attrCallingStationID)),
+			userName:         string(p.first(attrUserName)),
+			nasIdentifier:    string(p.first(attrNASIdentifier)),
+		}
 		s.mu.Unlock()
 	}
 	s.destroy(sess)
@@ -579,23 +621,100 @@ func addVLAN(p *packet, vlan int) {
 	p.add(attrTunnelPrivateGroup, append([]byte{tag}, []byte(strconv.Itoa(vlan))...))
 }
 
-// Disconnect sends a best-effort RADIUS Disconnect-Request (CoA, RFC 5176) for an
-// Acct-Session-Id over the proxy connection that established it. Returns an error
-// if the session's connection is not tracked.
-func (s *Server) Disconnect(acctSessionID string) error {
+// ErrNoLiveSession is returned when no tracked NAS session matches the key.
+var ErrNoLiveSession = errors.New("radsec: no live NAS session for the given key")
+
+// DAResult is the outcome of a Dynamic Authorization exchange (RFC 5176).
+type DAResult struct {
+	Acked bool // true if the NAS ACKed (Disconnect-ACK / CoA-ACK); false = NAK
+	Code  byte // the raw response code, for logging
+}
+
+// Disconnect terminates a live NAS session — the enforcement kill switch. Sends a
+// RFC 5176 Disconnect-Request over the RadSec link the session arrived on and
+// BLOCKS until the NAS returns Disconnect-ACK/NAK or the timeout elapses. Unlike
+// the previous fire-and-forget version it confirms the session was actually cut.
+func (s *Server) Disconnect(ctx context.Context, sessionKey string) (DAResult, error) {
+	return s.dynAuth(ctx, sessionKey, codeDisconnectReq, nil)
+}
+
+// Quarantine moves a live session to a restricted VLAN (and optional Filter-Id
+// ACL) IN PLACE via a RFC 5176 CoA-Request — contain-and-observe rather than a
+// hard cut. Blocks for the CoA-ACK/NAK.
+func (s *Server) Quarantine(ctx context.Context, sessionKey string, vlan int, acl string) (DAResult, error) {
+	return s.dynAuth(ctx, sessionKey, codeCoARequest, func(req *packet) {
+		if vlan > 0 {
+			addVLAN(req, vlan)
+		}
+		if acl != "" {
+			req.add(attrFilterID, []byte(acl))
+		}
+	})
+}
+
+// dynAuth builds, sends, and awaits the ACK/NAK for one Dynamic Authorization
+// request. It attaches the session-identification attributes captured at
+// Access-Accept and a Message-Authenticator (REQUIRED on CoA/Disconnect, RFC
+// 5176 §3.4) — finalize([16]zero) then yields the correct Request Authenticator.
+func (s *Server) dynAuth(ctx context.Context, sessionKey string, code byte, build func(*packet)) (DAResult, error) {
 	s.mu.Lock()
-	conn := s.live[acctSessionID]
-	s.mu.Unlock()
-	if conn == nil {
-		return fmt.Errorf("radsec: no live connection for session %s", acctSessionID)
+	ls := s.live[sessionKey]
+	if ls == nil {
+		s.mu.Unlock()
+		return DAResult{}, ErrNoLiveSession
 	}
-	req := &packet{Code: codeDisconnectReq, Identifier: byte(time.Now().UnixNano())}
-	req.add(attrAcctSessionID, []byte(acctSessionID))
-	// For CoA the authenticator is computed over the request itself (RFC 5176).
-	var zero [16]byte
-	raw := req.finalize(zero)
-	_, err := conn.Write(raw)
-	return err
+	id := s.daID
+	s.daID++
+	ch := make(chan *packet, 1)
+	s.pending[id] = ch
+	conn := ls.conn
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+	}()
+
+	req := &packet{Code: code, Identifier: id}
+	if ls.acctSessionID != "" {
+		req.add(attrAcctSessionID, []byte(ls.acctSessionID))
+	}
+	if ls.callingStationID != "" {
+		req.add(attrCallingStationID, []byte(ls.callingStationID))
+	}
+	if ls.userName != "" {
+		req.add(attrUserName, []byte(ls.userName))
+	}
+	if ls.nasIdentifier != "" {
+		req.add(attrNASIdentifier, []byte(ls.nasIdentifier))
+	}
+	if build != nil {
+		build(req)
+	}
+	req.add(attrMessageAuthkey, make([]byte, 16)) // placeholder → finalize computes HMAC-MD5
+	raw := req.finalize([16]byte{})
+
+	if _, err := conn.Write(raw); err != nil {
+		return DAResult{}, fmt.Errorf("radsec: write dynamic-auth request: %w", err)
+	}
+
+	const daTimeout = 5 * time.Second
+	timer := time.NewTimer(daTimeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return DAResult{}, ctx.Err()
+	case <-timer.C:
+		return DAResult{}, fmt.Errorf("radsec: no ACK/NAK for session %q within %s", sessionKey, daTimeout)
+	case resp := <-ch:
+		acked := resp.Code == codeDisconnectACK || resp.Code == codeCoAACK
+		if acked && code == codeDisconnectReq {
+			s.mu.Lock()
+			delete(s.live, sessionKey) // session is gone; stop tracking it
+			s.mu.Unlock()
+		}
+		return DAResult{Acked: acked, Code: resp.Code}, nil
+	}
 }
 
 func nonEmpty(a, b string) string {
