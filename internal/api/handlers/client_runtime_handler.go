@@ -365,10 +365,17 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 	// Continuous enforcement: a mid-session posture DROP drives a CoA/Disconnect at
 	// the NAS. Async — the CoA has its own timeout and must not block the report ACK
 	// (and the request context ends when we return). No live NAS session = no-op.
+	//
+	// The session key is the device cert CN — that is what the RadSec server tracks
+	// (and what /enroll keys on). deviceID above is the internal row UUID (used for
+	// the posture DB lookups) and would NEVER match the CN-keyed session map.
 	if h.enforcement.Enabled() && prevCompliant && !effectiveCompliant {
-		device := deviceID
+		deviceCN := c.GetString("device_cn")
+		if deviceCN == "" {
+			deviceCN = deviceID // fall back, though the CN should always be set on this route
+		}
 		org := orgID
-		go h.enforcement.RespondToRisk(context.Background(), device, org, "posture downgrade (device reported non-compliant)")
+		go h.enforcement.RespondToRisk(context.Background(), deviceCN, org, "posture downgrade (device reported non-compliant)")
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})

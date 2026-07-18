@@ -44,6 +44,20 @@ func TestRespondToRisk_Quarantine(t *testing.T) {
 	}
 }
 
+type fakeBlocker struct {
+	calls    int
+	lastCN   string
+	lastOrg  string
+	lastWho  string
+	blockErr error
+}
+
+func (f *fakeBlocker) BlockRenewal(_ context.Context, orgID, deviceID, _, blockedBy string) error {
+	f.calls++
+	f.lastCN, f.lastOrg, f.lastWho = deviceID, orgID, blockedBy
+	return f.blockErr
+}
+
 func TestRespondToRisk_Disconnect(t *testing.T) {
 	fe := &fakeEnforcer{ackDisconnect: true}
 	c := NewController(fe, ActionDisconnect, 0, "", zap.NewNop())
@@ -52,6 +66,33 @@ func TestRespondToRisk_Disconnect(t *testing.T) {
 	}
 	if fe.disconnectCalls != 1 || fe.quarantineCalls != 0 {
 		t.Fatalf("want a single Disconnect; got disconnect=%d quarantine=%d", fe.disconnectCalls, fe.quarantineCalls)
+	}
+}
+
+// A hard disconnect must also block cert renewal — the dead-man's timer — so the
+// device can't just re-mint a fresh cert and reconnect elsewhere.
+func TestRespondToRisk_DisconnectBlocksRenewal(t *testing.T) {
+	fe := &fakeEnforcer{ackDisconnect: true}
+	fb := &fakeBlocker{}
+	c := NewController(fe, ActionDisconnect, 0, "", zap.NewNop()).WithRenewalBlocker(fb)
+	if _, err := c.RespondToRisk(context.Background(), "dev-cn", "org-1", "drop"); err != nil {
+		t.Fatal(err)
+	}
+	if fb.calls != 1 || fb.lastCN != "dev-cn" || fb.lastOrg != "org-1" || fb.lastWho != "enforcement" {
+		t.Fatalf("renewal block: calls=%d cn=%q org=%q who=%q; want 1/dev-cn/org-1/enforcement", fb.calls, fb.lastCN, fb.lastOrg, fb.lastWho)
+	}
+}
+
+// Quarantine is recoverable — it must NOT block renewal.
+func TestRespondToRisk_QuarantineDoesNotBlockRenewal(t *testing.T) {
+	fe := &fakeEnforcer{ackQuarantine: true}
+	fb := &fakeBlocker{}
+	c := NewController(fe, ActionQuarantine, 50, "", zap.NewNop()).WithRenewalBlocker(fb)
+	if _, err := c.RespondToRisk(context.Background(), "dev-cn", "org-1", "drop"); err != nil {
+		t.Fatal(err)
+	}
+	if fb.calls != 0 {
+		t.Fatalf("quarantine must not block renewal; got %d calls", fb.calls)
 	}
 }
 

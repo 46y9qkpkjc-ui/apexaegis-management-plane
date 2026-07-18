@@ -588,3 +588,65 @@ func (s *DeviceStore) RefreshLicenseConsumption(ctx context.Context, orgID strin
 	}
 	return nil
 }
+
+// ── Device renewal blocks (continuous-enforcement dead-man's timer) ──────────
+//
+// deviceID here is the certificate COMMON NAME (what /enroll receives and the
+// RadSec session map keys on), NOT the internal devices.id UUID.
+
+// RenewalBlock is a recorded refusal to renew a device's certificate.
+type RenewalBlock struct {
+	DeviceID  string    `json:"device_id"`
+	Reason    string    `json:"reason"`
+	BlockedBy string    `json:"blocked_by"`
+	BlockedAt time.Time `json:"blocked_at"`
+}
+
+// BlockRenewal records (or refreshes) a renewal block for a device CN. Idempotent.
+func (s *DeviceStore) BlockRenewal(ctx context.Context, orgID, deviceID, reason, blockedBy string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_mgmt.device_renewal_blocks
+		(org_id, device_id, reason, blocked_by, blocked_at) VALUES ($1,$2,$3,$4,now())
+		ON CONFLICT (org_id, device_id) DO UPDATE SET reason=EXCLUDED.reason, blocked_by=EXCLUDED.blocked_by, blocked_at=now()`,
+		orgID, deviceID, reason, blockedBy)
+	return err
+}
+
+// IsRenewalBlocked reports whether a device CN is blocked from renewing, and why.
+func (s *DeviceStore) IsRenewalBlocked(ctx context.Context, orgID, deviceID string) (bool, string, error) {
+	var reason string
+	err := s.db.QueryRowContext(ctx, `SELECT reason FROM system_mgmt.device_renewal_blocks
+		WHERE org_id=$1 AND device_id=$2`, orgID, deviceID).Scan(&reason)
+	if err == sql.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	return true, reason, nil
+}
+
+// ClearRenewalBlock lifts a renewal block (after remediation / re-imaging).
+func (s *DeviceStore) ClearRenewalBlock(ctx context.Context, orgID, deviceID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM system_mgmt.device_renewal_blocks
+		WHERE org_id=$1 AND device_id=$2`, orgID, deviceID)
+	return err
+}
+
+// ListRenewalBlocks returns all active renewal blocks for an org.
+func (s *DeviceStore) ListRenewalBlocks(ctx context.Context, orgID string) ([]RenewalBlock, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id, reason, blocked_by, blocked_at
+		FROM system_mgmt.device_renewal_blocks WHERE org_id=$1 ORDER BY blocked_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RenewalBlock
+	for rows.Next() {
+		var b RenewalBlock
+		if err := rows.Scan(&b.DeviceID, &b.Reason, &b.BlockedBy, &b.BlockedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}

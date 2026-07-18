@@ -247,8 +247,9 @@ func main() {
 	}
 
 	// Continuous enforcement PDP: turns a posture DROP into a CoA/Disconnect at the
-	// NAS (POSTURE_COA_ACTION=off|quarantine|disconnect, default off).
-	enforcementCtl := enforcement.ConfigFromEnv(sessionEnforcer, logger)
+	// NAS (POSTURE_COA_ACTION=off|quarantine|disconnect, default off), and on a hard
+	// disconnect also blocks the device's cert renewal (the dead-man's timer).
+	enforcementCtl := enforcement.ConfigFromEnv(sessionEnforcer, logger).WithRenewalBlocker(deviceStore)
 	if enforcementCtl.Enabled() {
 		logger.Info("enforcement: posture-drop auto-CoA enabled")
 	}
@@ -628,7 +629,7 @@ func main() {
 
 	// MP-brokered device enrolment (unauthenticated — the per-org enrolment secret
 	// is the auth). Validates the secret → mints a one-time step-ca token.
-	enrolHandler := handlers.NewEnrolHandler(db.NewEnrolSecretStore(dbConn, logger), enrolCA, logger)
+	enrolHandler := handlers.NewEnrolHandler(db.NewEnrolSecretStore(dbConn, logger), enrolCA, deviceStore, logger)
 	router.POST("/api/v1/enroll", enrolHandler.Enroll)
 
 	// Device-authenticated legacy agent policy endpoint.
@@ -765,6 +766,10 @@ func main() {
 		adminAPI.POST("/enrol-secrets", enrolHandler.GenerateSecret)
 		adminAPI.GET("/enrol-secrets", enrolHandler.ListSecrets)
 		adminAPI.DELETE("/enrol-secrets/:id", enrolHandler.RevokeSecret)
+		// Device renewal blocks (dead-man's timer): list, manually block, clear.
+		adminAPI.GET("/renewal-blocks", enrolHandler.ListRenewalBlocks)
+		adminAPI.POST("/renewal-blocks", enrolHandler.BlockRenewal)
+		adminAPI.DELETE("/renewal-blocks/:device_id", enrolHandler.ClearRenewalBlock)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──

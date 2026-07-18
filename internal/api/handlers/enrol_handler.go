@@ -16,11 +16,12 @@ import (
 type EnrolHandler struct {
 	secrets *db.EnrolSecretStore
 	ca      *security.StepCADeviceCA
+	devices *db.DeviceStore // renewal-block gate (dead-man's timer)
 	logger  *zap.Logger
 }
 
-func NewEnrolHandler(secrets *db.EnrolSecretStore, ca *security.StepCADeviceCA, logger *zap.Logger) *EnrolHandler {
-	return &EnrolHandler{secrets: secrets, ca: ca, logger: logger}
+func NewEnrolHandler(secrets *db.EnrolSecretStore, ca *security.StepCADeviceCA, devices *db.DeviceStore, logger *zap.Logger) *EnrolHandler {
+	return &EnrolHandler{secrets: secrets, ca: ca, devices: devices, logger: logger}
 }
 
 // Enroll — POST /api/v1/enroll (unauthenticated; the per-org enrolment secret IS
@@ -60,6 +61,24 @@ func (h *EnrolHandler) Enroll(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "invalid organization or enrolment secret"})
 		return
 	}
+
+	// Gated renewal (the dead-man's timer): a device the enforcement pipeline or an
+	// operator flagged as compromised is refused a fresh token, so its short-lived
+	// cert lapses and access dies even if it dodged the live CoA. Keyed by the cert
+	// CN (req.DeviceID) — the same identity the kill switch and posture trigger use.
+	if h.secrets != nil && h.devices != nil {
+		if blocked, reason, berr := h.devices.IsRenewalBlocked(c.Request.Context(), req.OrgID, req.DeviceID); berr != nil {
+			h.logger.Error("renewal-block check failed", zap.Error(berr), zap.String("org_id", req.OrgID))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "enrolment check failed"})
+			return
+		} else if blocked {
+			h.logger.Warn("enrolment refused — device renewal blocked",
+				zap.String("org_id", req.OrgID), zap.String("device_id", req.DeviceID), zap.String("reason", reason))
+			c.JSON(http.StatusForbidden, gin.H{"error": "this device is blocked from enrolment; contact your administrator"})
+			return
+		}
+	}
+
 	// Pass the SECRET-VALIDATED org, never a caller-asserted one: the token's org
 	// claim is what the CA pins the cert's Organization from, and RADIUS reads the
 	// tenant out of that O. req.OrgID is only trusted here because Validate above
@@ -131,4 +150,59 @@ func (h *EnrolHandler) RevokeSecret(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
+}
+
+// ── Admin: device renewal blocks (the dead-man's timer) ──────────────────────
+
+// ListRenewalBlocks returns the org's active renewal blocks.
+func (h *EnrolHandler) ListRenewalBlocks(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" || h.devices == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	blocks, err := h.devices.ListRenewalBlocks(c.Request.Context(), orgID)
+	if err != nil {
+		h.logger.Error("list renewal blocks", zap.Error(err), zap.String("org_id", orgID))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list renewal blocks"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"blocks": blocks})
+}
+
+// BlockRenewal manually blocks a device (by cert CN) from renewing.
+func (h *EnrolHandler) BlockRenewal(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" || h.devices == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	var req struct {
+		DeviceID string `json:"device_id"`
+		Reason   string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.DeviceID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id is required"})
+		return
+	}
+	if err := h.devices.BlockRenewal(c.Request.Context(), orgID, strings.TrimSpace(req.DeviceID), req.Reason, c.GetString("user_id")); err != nil {
+		h.logger.Error("block renewal", zap.Error(err), zap.String("org_id", orgID))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to block renewal"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"status": "blocked", "device_id": req.DeviceID})
+}
+
+// ClearRenewalBlock lifts a device's renewal block after remediation.
+func (h *EnrolHandler) ClearRenewalBlock(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	if orgID == "" || h.devices == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "organization context required"})
+		return
+	}
+	if err := h.devices.ClearRenewalBlock(c.Request.Context(), orgID, c.Param("device_id")); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear renewal block"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "cleared"})
 }
