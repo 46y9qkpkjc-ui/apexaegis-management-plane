@@ -30,6 +30,7 @@ import (
 	"github.com/zcp/management-plane/internal/auth"
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dot1x"
+	"github.com/zcp/management-plane/internal/enforcement"
 	"github.com/zcp/management-plane/internal/gateway"
 	"github.com/zcp/management-plane/internal/grant"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
@@ -243,6 +244,13 @@ func main() {
 		}
 	} else {
 		logger.Info("radsec: Cloud RADIUS disabled (set RADSEC_*_FILE env to enable)")
+	}
+
+	// Continuous enforcement PDP: turns a posture DROP into a CoA/Disconnect at the
+	// NAS (POSTURE_COA_ACTION=off|quarantine|disconnect, default off).
+	enforcementCtl := enforcement.ConfigFromEnv(sessionEnforcer, logger)
+	if enforcementCtl.Enabled() {
+		logger.Info("enforcement: posture-drop auto-CoA enabled")
 	}
 
 	// ── Advanced Security Group Tags (SGT) with multi-domain context ──
@@ -606,7 +614,7 @@ func main() {
 	deviceClientAPI := router.Group("/api/v1/client")
 	deviceClientAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	{
-		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, deviceStore, logger)
+		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, deviceStore, enforcementCtl, logger)
 		deviceClientAPI.POST("/bind-user", middleware.JWTAuth(authStore), middleware.RequireRole("client_user"), clientRuntimeHandler.BindUser)
 		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
 		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)

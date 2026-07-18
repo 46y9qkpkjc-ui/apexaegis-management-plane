@@ -121,6 +121,28 @@ variable "device_stepca_provisioner" {
   default     = "portal"
 }
 
+variable "posture_coa_action" {
+  description = "Auto-CoA on a posture DROP (POSTURE_COA_ACTION): off | quarantine | disconnect. Default off — a posture downgrade is observed but no session is cut until this is deliberately enabled (and the CoA path is validated against real switch/AP hardware)."
+  type        = string
+  default     = "off"
+  validation {
+    condition     = contains(["off", "quarantine", "disconnect"], var.posture_coa_action)
+    error_message = "posture_coa_action must be one of: off, quarantine, disconnect."
+  }
+}
+
+variable "posture_quarantine_vlan" {
+  description = "VLAN a quarantined device is moved to via CoA when posture_coa_action=quarantine (POSTURE_QUARANTINE_VLAN)."
+  type        = number
+  default     = 0
+}
+
+variable "posture_quarantine_acl" {
+  description = "Optional Filter-Id ACL applied alongside the quarantine VLAN (POSTURE_QUARANTINE_ACL)."
+  type        = string
+  default     = ""
+}
+
 variable "device_grant_dc_segments" {
   description = "JSON map of DC segments a machine tunnel may reach pre-logon: {\"*\":{\"host\":\"<DC IP>\",\"ports\":[...]}}."
   type        = string
@@ -688,6 +710,9 @@ resource "aws_ecs_task_definition" "mgmt" {
       { name = "DEVICE_STEPCA_URL", value = var.device_stepca_url },
       { name = "DEVICE_STEPCA_FINGERPRINT", value = var.device_stepca_fingerprint },
       { name = "DEVICE_STEPCA_PROVISIONER", value = var.device_stepca_provisioner },
+      { name = "POSTURE_COA_ACTION", value = var.posture_coa_action },
+      { name = "POSTURE_QUARANTINE_VLAN", value = tostring(var.posture_quarantine_vlan) },
+      { name = "POSTURE_QUARANTINE_ACL", value = var.posture_quarantine_acl },
       # Kerberos SSO (POST /api/v1/agent/sso/kerberos): the SPN the client
       # acquires a service ticket for, and the AD realm. Non-secret; the keytab
       # itself rides MP_KRB5_KEYTAB_B64 (SSM SecureString, in secrets below).

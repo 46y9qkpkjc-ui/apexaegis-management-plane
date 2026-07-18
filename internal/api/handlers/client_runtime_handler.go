@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zcp/management-plane/internal/api/middleware"
 	"github.com/zcp/management-plane/internal/db"
+	"github.com/zcp/management-plane/internal/enforcement"
 	"go.uber.org/zap"
 )
 
@@ -30,14 +32,18 @@ type ClientRuntimeHandler struct {
 	// clients keep working during rollout; a present-but-invalid signature is
 	// ALWAYS rejected regardless.
 	requireAttestation bool
+	// enforcement responds to a posture DROP (compliant→non-compliant) by driving
+	// a CoA/Disconnect at the NAS — continuous enforcement. nil-safe (off by default).
+	enforcement *enforcement.Controller
 }
 
-func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, logger *zap.Logger) *ClientRuntimeHandler {
+func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, enforcer *enforcement.Controller, logger *zap.Logger) *ClientRuntimeHandler {
 	return &ClientRuntimeHandler{
 		clientConfigStore:  clientConfigStore,
 		deviceStore:        deviceStore,
 		logger:             logger,
 		requireAttestation: os.Getenv("POSTURE_REQUIRE_ATTESTATION") == "true",
+		enforcement:        enforcer,
 	}
 }
 
@@ -337,6 +343,13 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 		}
 	}
 
+	// Capture the prior verdict BEFORE saving, so we can detect a DROP
+	// (compliant→non-compliant) rather than re-acting on every non-compliant report.
+	prevCompliant := false
+	if h.enforcement.Enabled() {
+		prevCompliant, _, _ = h.deviceStore.LatestComplianceForDevice(c.Request.Context(), orgID, deviceID)
+	}
+
 	err := h.deviceStore.SavePostureReport(c.Request.Context(), orgID, deviceID, db.DevicePostureReport{
 		CheckedAt: request.CheckedAt, Compliant: effectiveCompliant, Score: request.Score,
 		DiskEncrypted: request.DiskEncrypted, FirewallEnabled: request.FirewallEnabled,
@@ -348,6 +361,16 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save posture"})
 		return
 	}
+
+	// Continuous enforcement: a mid-session posture DROP drives a CoA/Disconnect at
+	// the NAS. Async — the CoA has its own timeout and must not block the report ACK
+	// (and the request context ends when we return). No live NAS session = no-op.
+	if h.enforcement.Enabled() && prevCompliant && !effectiveCompliant {
+		device := deviceID
+		org := orgID
+		go h.enforcement.RespondToRisk(context.Background(), device, org, "posture downgrade (device reported non-compliant)")
+	}
+
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 
