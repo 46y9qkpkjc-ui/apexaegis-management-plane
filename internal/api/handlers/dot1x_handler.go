@@ -22,17 +22,57 @@ type SessionEnforcer interface {
 	Quarantine(ctx context.Context, sessionKey string, vlan int, acl string) (acked bool, err error)
 }
 
+// RiskResponder applies the org's CONFIGURED enforcement policy to a risk signal
+// about a device (satisfied by the enforcement controller). This is the pluggable
+// seam: any external detector — SWG/NDR, deception tripwire, UEBA, an analyst —
+// reports "device X is risky" and the MP decides the response, rather than the
+// caller choosing disconnect vs quarantine.
+type RiskResponder interface {
+	RespondToRisk(ctx context.Context, sessionKey, orgID, reason string) (acted bool, err error)
+}
+
 // Dot1XHandler exposes HTTPS-based 802.1X AAA endpoints.
 // SDN whitebox switches call these instead of RADIUS.
 type Dot1XHandler struct {
 	auth     *dot1x.Authenticator
 	enforcer SessionEnforcer // optional; nil when RadSec (CoA) is not configured
+	risk     RiskResponder   // optional; the enforcement PDP for external risk signals
 	auditLog *audit.AuditLog
 	logger   *zap.Logger
 }
 
-func NewDot1XHandler(auth *dot1x.Authenticator, enforcer SessionEnforcer, auditLog *audit.AuditLog, logger *zap.Logger) *Dot1XHandler {
-	return &Dot1XHandler{auth: auth, enforcer: enforcer, auditLog: auditLog, logger: logger}
+func NewDot1XHandler(auth *dot1x.Authenticator, enforcer SessionEnforcer, risk RiskResponder, auditLog *audit.AuditLog, logger *zap.Logger) *Dot1XHandler {
+	return &Dot1XHandler{auth: auth, enforcer: enforcer, risk: risk, auditLog: auditLog, logger: logger}
+}
+
+// IngestRiskSignal — POST /api/v1/dot1x/sessions/:id/risk-signal. An external
+// detector reports that device :id (cert CN) is risky; the MP applies its
+// CONFIGURED enforcement policy (POSTURE_COA_ACTION). Distinct from the explicit
+// disconnect/quarantine endpoints: the detector reports risk, policy picks the
+// action. Body: {reason, source}.
+func (h *Dot1XHandler) IngestRiskSignal(c *gin.Context) {
+	id := c.Param("id")
+	orgID := c.GetString("org_id")
+	if h.risk == nil {
+		middleware.AbortWithSafeError(c, http.StatusServiceUnavailable, nil)
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+		Source string `json:"source"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	reason := req.Reason
+	if req.Source != "" {
+		reason = req.Source + ": " + reason
+	}
+	acted, err := h.risk.RespondToRisk(c.Request.Context(), id, orgID, reason)
+	h.recordCoA(c, id, "risk-signal", acted, err)
+	if err != nil {
+		middleware.AbortWithSafeError(c, http.StatusBadGateway, nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "processed", "action_applied": acted})
 }
 
 // ── Authentication ──────────────────────────────────────────────────

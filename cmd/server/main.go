@@ -808,7 +808,7 @@ func main() {
 	dot1xAPI := router.Group("/api/v1/dot1x")
 	dot1xAPI.Use(middleware.GatewayAuth(gwRegistry))
 	{
-		dot1xHandler := handlers.NewDot1XHandler(dot1xAuth, sessionEnforcer, auditLog, logger)
+		dot1xHandler := handlers.NewDot1XHandler(dot1xAuth, sessionEnforcer, enforcementCtl, auditLog, logger)
 		dot1xAPI.POST("/authenticate", dot1xHandler.Authenticate)
 		dot1xAPI.POST("/authorize", dot1xHandler.Authorize)
 		dot1xAPI.POST("/accounting", dot1xHandler.Accounting)
@@ -816,6 +816,8 @@ func main() {
 		dot1xAPI.GET("/sessions/:id", dot1xHandler.GetSession)
 		dot1xAPI.POST("/sessions/:id/disconnect", dot1xHandler.DisconnectSession)
 		dot1xAPI.POST("/sessions/:id/quarantine", dot1xHandler.QuarantineSession)
+		// External risk signal (SWG/NDR/deception/analyst) → configured enforcement.
+		dot1xAPI.POST("/sessions/:id/risk-signal", dot1xHandler.IngestRiskSignal)
 		dot1xAPI.POST("/mac/register", dot1xHandler.RegisterMAC)
 		dot1xAPI.DELETE("/mac/:mac", dot1xHandler.RemoveMAC)
 		dot1xAPI.GET("/mac", dot1xHandler.ListMACs)
