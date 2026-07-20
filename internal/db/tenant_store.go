@@ -189,8 +189,9 @@ type DeviceRow struct {
 	TenantID    string `json:"tenant_id"`
 }
 
-// ListDevices returns devices for one tenant, or all tenants when tenantID is empty.
-func (s *TenantStore) ListDevices(ctx context.Context, tenantID string) ([]DeviceRow, error) {
+// ListDevices returns devices for one tenant, or — when tenantID is empty — every
+// tenant the caller may see (scoped to their operator fleet or single org).
+func (s *TenantStore) ListDevices(ctx context.Context, tenantID string, scope TenantScope) ([]DeviceRow, error) {
 	q := `SELECT COALESCE(d.device_id,''), COALESCE(d.device_name,''), COALESCE(d.os_type,''),
 	             COALESCE(d.os_version,''), COALESCE(d.compliance_status,'unknown'), d.managed_type,
 	             COALESCE(d.last_seen::text,''), o.name, o.id::text
@@ -198,8 +199,14 @@ func (s *TenantStore) ListDevices(ctx context.Context, tenantID string) ([]Devic
 	      JOIN system_mgmt.organizations o ON o.id = d.org_id`
 	args := []interface{}{}
 	if tenantID != "" {
-		q += " WHERE d.org_id = $1"
 		args = append(args, tenantID)
+		q += " WHERE d.org_id = $1"
+	} else if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += " WHERE COALESCE(o.operator,'ApexAegis (direct)') = $1"
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += " WHERE d.org_id = $1"
 	}
 	q += " ORDER BY o.name, d.device_name"
 	rows, err := s.db.DB.QueryContext(ctx, q, args...)
@@ -219,17 +226,24 @@ func (s *TenantStore) ListDevices(ctx context.Context, tenantID string) ([]Devic
 	return out, rows.Err()
 }
 
-// ListGhostedApps returns ghosted apps for one tenant, or all tenants when
-// tenantID is empty (consolidated overview).
-func (s *TenantStore) ListGhostedApps(ctx context.Context, tenantID string) ([]GhostedAppRow, error) {
+// ListGhostedApps returns ghosted apps for one tenant, or — when tenantID is
+// empty — every tenant the caller may see (scoped to their operator fleet or
+// single org).
+func (s *TenantStore) ListGhostedApps(ctx context.Context, tenantID string, scope TenantScope) ([]GhostedAppRow, error) {
 	q := `SELECT ga.name, ga.vendor, ga.category, ga.device_count, ga.risk_level,
 	             ga.duplicates_feature, o.name, o.id::text
 	      FROM system_mgmt.ghosted_apps ga
 	      JOIN system_mgmt.organizations o ON o.id = ga.org_id`
 	args := []interface{}{}
 	if tenantID != "" {
-		q += " WHERE ga.org_id = $1"
 		args = append(args, tenantID)
+		q += " WHERE ga.org_id = $1"
+	} else if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += " WHERE COALESCE(o.operator,'ApexAegis (direct)') = $1"
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += " WHERE ga.org_id = $1"
 	}
 	q += " ORDER BY o.name, ga.device_count DESC"
 	rows, err := s.db.DB.QueryContext(ctx, q, args...)
@@ -301,12 +315,35 @@ func NewTenantStore(db *DB, logger *zap.Logger) *TenantStore {
 const tenantSummaryCols = `
 	o.id, o.name, o.tenant_type, COALESCE(o.operator,'ApexAegis (direct)'), COALESCE(o.plan,''), COALESCE(o.region,''), COALESCE(o.status,'active'),
 	(SELECT count(*) FROM system_mgmt.users u          WHERE u.org_id = o.id),
-	(SELECT count(*) FROM system_mgmt.client_users c   WHERE c.org_id = o.id),
+	CASE WHEN o.user_count > 0 THEN o.user_count
+	     ELSE (SELECT count(*) FROM system_mgmt.client_users c WHERE c.org_id = o.id) END,
 	(SELECT count(*) FROM system_mgmt.policies p        WHERE p.org_id = o.id::text),
 	CASE WHEN o.device_count > 0 THEN o.device_count
 	     ELSE (SELECT count(*) FROM system_mgmt.devices d WHERE d.org_id = o.id) END,
 	(SELECT count(*) FROM system_mgmt.dns_access_logs l WHERE l.org_id = o.id),
 	(SELECT count(*) FROM system_mgmt.dns_access_logs l WHERE l.org_id = o.id AND l.verdict = 'blocked')`
+
+// TenantScope restricts a cross-tenant query to what the caller may see. The zero
+// value is unrestricted (super_admin / the ApexAegis platform view). Operator set
+// = one MSP operator's fleet (orgs WHERE operator = it). OrgID set = a single
+// tenant (a plain tenant admin, locked to their own org).
+type TenantScope struct {
+	Operator string
+	OrgID    string
+}
+
+// Allows reports whether a tenant (identified by its operator + id) is visible
+// under this scope. The zero scope allows everything.
+func (t TenantScope) Allows(operator, orgID string) bool {
+	switch {
+	case t.Operator != "":
+		return operator == t.Operator
+	case t.OrgID != "":
+		return orgID == t.OrgID
+	default:
+		return true
+	}
+}
 
 func scanTenantSummary(scan func(dest ...any) error) (TenantSummary, error) {
 	var t TenantSummary
@@ -315,13 +352,23 @@ func scanTenantSummary(scan func(dest ...any) error) (TenantSummary, error) {
 	return t, err
 }
 
-// ListTenantSummaries returns headline activity for every tenant.
-func (s *TenantStore) ListTenantSummaries(ctx context.Context) ([]TenantSummary, error) {
-	rows, err := s.db.DB.QueryContext(ctx, `
-		SELECT `+tenantSummaryCols+`
+// ListTenantSummaries returns headline activity for the tenants the caller may
+// see (all tenants for the platform view, one operator's fleet for an MSP, or a
+// single org for a tenant admin).
+func (s *TenantStore) ListTenantSummaries(ctx context.Context, scope TenantScope) ([]TenantSummary, error) {
+	q := `SELECT ` + tenantSummaryCols + `
 		FROM system_mgmt.organizations o
-		WHERE o.status IS NULL OR o.status != 'deleted'
-		ORDER BY o.name`)
+		WHERE (o.status IS NULL OR o.status != 'deleted')`
+	args := []interface{}{}
+	if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += ` AND COALESCE(o.operator,'ApexAegis (direct)') = $1`
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += ` AND o.id = $1`
+	}
+	q += ` ORDER BY o.name`
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -347,18 +394,26 @@ type OperatorSummary struct {
 	Devices   int64  `json:"devices"`
 }
 
-// ListOperators returns the per-operator rollup for the partner ladder.
-func (s *TenantStore) ListOperators(ctx context.Context) ([]OperatorSummary, error) {
-	rows, err := s.db.DB.QueryContext(ctx, `
-		SELECT COALESCE(NULLIF(operator,''),'ApexAegis (direct)') AS operator,
+// ListOperators returns the per-operator rollup for the partner ladder, scoped to
+// what the caller may see (an MSP operator only sees their own row).
+func (s *TenantStore) ListOperators(ctx context.Context, scope TenantScope) ([]OperatorSummary, error) {
+	q := `SELECT COALESCE(NULLIF(operator,''),'ApexAegis (direct)') AS operator,
 		       count(*) AS tenants,
 		       count(*) FILTER (WHERE tenant_type = 'dedicated') AS dedicated,
 		       count(*) FILTER (WHERE tenant_type = 'shared') AS shared,
 		       COALESCE(sum(device_count), 0) AS devices
 		FROM system_mgmt.organizations
-		WHERE status IS NULL OR status != 'deleted'
-		GROUP BY 1
-		ORDER BY tenants DESC, operator`)
+		WHERE (status IS NULL OR status != 'deleted')`
+	args := []interface{}{}
+	if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += ` AND COALESCE(NULLIF(operator,''),'ApexAegis (direct)') = $1`
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += ` AND id = $1`
+	}
+	q += ` GROUP BY 1 ORDER BY tenants DESC, operator`
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +427,15 @@ func (s *TenantStore) ListOperators(ctx context.Context) ([]OperatorSummary, err
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+// OrgOperator returns a tenant's operator string, for authorization checks on
+// per-tenant endpoints. Returns sql.ErrNoRows if the tenant does not exist.
+func (s *TenantStore) OrgOperator(ctx context.Context, orgID string) (string, error) {
+	var op string
+	err := s.db.DB.QueryRowContext(ctx,
+		`SELECT COALESCE(operator,'') FROM system_mgmt.organizations WHERE id = $1`, orgID).Scan(&op)
+	return op, err
 }
 
 // GetTenantDetail returns one tenant's summary plus recent blocks and policies.
@@ -424,7 +488,7 @@ func (s *TenantStore) GetTenantDetail(ctx context.Context, tenantID string) (*Te
 		return nil, err
 	}
 
-	ghosted, err := s.ListGhostedApps(ctx, tenantID)
+	ghosted, err := s.ListGhostedApps(ctx, tenantID, TenantScope{})
 	if err != nil {
 		return nil, err
 	}

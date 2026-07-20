@@ -22,9 +22,26 @@ func NewTenantHandler(store *db.TenantStore, logger *zap.Logger) *TenantHandler 
 	return &TenantHandler{store: store, logger: logger}
 }
 
+// callerScope derives the tenant visibility for the authenticated caller:
+//   - super_admin        → unrestricted (the ApexAegis platform view)
+//   - operator_scope set  → that MSP operator's fleet (orgs under their operator)
+//   - otherwise           → the caller's own org only (a plain tenant admin)
+//
+// This is what makes an MSP operator (April/StarHub) and a tenant admin
+// (Samuel/Aspire) get different data from the same cross-tenant endpoints.
+func callerScope(c *gin.Context) db.TenantScope {
+	if c.GetString("role") == "super_admin" {
+		return db.TenantScope{}
+	}
+	if op := strings.TrimSpace(c.GetString("operator_scope")); op != "" {
+		return db.TenantScope{Operator: op}
+	}
+	return db.TenantScope{OrgID: strings.TrimSpace(c.GetString("user_org_id"))}
+}
+
 // ListTenants returns headline activity for every tenant (consolidated overview).
 func (h *TenantHandler) ListTenants(c *gin.Context) {
-	tenants, err := h.store.ListTenantSummaries(c.Request.Context())
+	tenants, err := h.store.ListTenantSummaries(c.Request.Context(), callerScope(c))
 	if err != nil {
 		h.logger.Error("tenant overview", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tenant overview"})
@@ -37,7 +54,7 @@ func (h *TenantHandler) ListTenants(c *gin.Context) {
 // top = ApexAegis (the white-label platform), middle = operators (StarHub,
 // Singtel, ViewQwest, SPtel, M1, Optus, …), bottom = each operator's tenants.
 func (h *TenantHandler) ListOperators(c *gin.Context) {
-	operators, err := h.store.ListOperators(c.Request.Context())
+	operators, err := h.store.ListOperators(c.Request.Context(), callerScope(c))
 	if err != nil {
 		h.logger.Error("operator rollup", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load operators"})
@@ -85,6 +102,20 @@ func (h *TenantHandler) ListTiers(c *gin.Context) {
 
 // GetEntitlements returns a tenant's tier limits + usage (feature/gateway/tenancy licensing).
 func (h *TenantHandler) GetEntitlements(c *gin.Context) {
+	// Scope guard: a restricted caller may only read entitlements for a tenant in
+	// their scope (own fleet / own org). Reported as not-found otherwise.
+	if scope := callerScope(c); scope.Operator != "" || scope.OrgID != "" {
+		op, err := h.store.OrgOperator(c.Request.Context(), c.Param("id"))
+		if err == sql.ErrNoRows || (err == nil && !scope.Allows(op, c.Param("id"))) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
+			return
+		}
+		if err != nil && err != sql.ErrNoRows {
+			h.logger.Error("entitlements scope check", zap.Error(err), zap.String("tenant_id", c.Param("id")))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load entitlements"})
+			return
+		}
+	}
 	e, err := h.store.GetEntitlements(c.Request.Context(), c.Param("id"))
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
@@ -136,7 +167,7 @@ func (h *TenantHandler) UpdatePostureProfile(c *gin.Context) {
 
 // ListDevices returns devices across all tenants for the enrolment inventory.
 func (h *TenantHandler) ListDevices(c *gin.Context) {
-	rows, err := h.store.ListDevices(c.Request.Context(), c.Query("tenant_id"))
+	rows, err := h.store.ListDevices(c.Request.Context(), c.Query("tenant_id"), callerScope(c))
 	if err != nil {
 		h.logger.Error("device inventory", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load devices"})
@@ -147,7 +178,7 @@ func (h *TenantHandler) ListDevices(c *gin.Context) {
 
 // ListGhosted returns ghosted apps across all tenants (consolidated overview).
 func (h *TenantHandler) ListGhosted(c *gin.Context) {
-	rows, err := h.store.ListGhostedApps(c.Request.Context(), "")
+	rows, err := h.store.ListGhostedApps(c.Request.Context(), "", callerScope(c))
 	if err != nil {
 		h.logger.Error("ghosted apps", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load ghosted apps"})
@@ -181,6 +212,12 @@ func (h *TenantHandler) GetTenant(c *gin.Context) {
 	if err != nil {
 		h.logger.Error("tenant detail", zap.Error(err), zap.String("tenant_id", c.Param("id")))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tenant"})
+		return
+	}
+	// A tenant outside the caller's scope is reported as not-found (never leak its
+	// existence) — an MSP operator can only drill into their own fleet.
+	if !callerScope(c).Allows(detail.Summary.Operator, detail.Summary.ID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
 		return
 	}
 	c.JSON(http.StatusOK, detail)

@@ -1285,7 +1285,7 @@ func startPostureConnectors(ctx context.Context, devices *db.DeviceStore, tenant
 		})
 	}
 	orgs := func(ctx context.Context) ([]string, error) {
-		summaries, err := tenants.ListTenantSummaries(ctx)
+		summaries, err := tenants.ListTenantSummaries(ctx, db.TenantScope{})
 		if err != nil {
 			return nil, err
 		}

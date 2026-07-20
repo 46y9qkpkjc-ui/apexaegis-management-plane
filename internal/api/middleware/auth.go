@@ -176,6 +176,13 @@ type tokenValidator interface {
 	ValidateAccessToken(tokenString string) (map[string]interface{}, error)
 }
 
+// tenantOperatorLookup lets JWTAuth confirm an MSP operator may scope into a
+// target tenant (the tenant must belong to the operator's fleet). The auth store
+// satisfies this; validators that don't simply disable operator tenant-switching.
+type tenantOperatorLookup interface {
+	TenantOperator(ctx context.Context, tenantID string) (string, error)
+}
+
 // JWTAuth validates JWT tokens for admin and mesh API endpoints.
 func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 	var v tokenValidator
@@ -221,16 +228,36 @@ func JWTAuth(validator ...tokenValidator) gin.HandlerFunc {
 		if email, ok := claims["email"].(string); ok {
 			c.Set("email", email)
 		}
+		// MSP operator scope: when present, this user manages every org whose
+		// `operator` equals this value (their fleet). Cross-tenant handlers read
+		// it to filter the overview to that fleet.
+		if operator, ok := claims["operator_scope"].(string); ok && strings.TrimSpace(operator) != "" {
+			c.Set("operator_scope", operator)
+		}
 
-		// MSP tenant scoping: a super_admin (the manager-of-managers) may scope
-		// the entire console to one tenant via the X-Scope-Tenant-ID header set by
-		// the tenant switcher. This overrides org_id so every org-scoped handler
-		// (all 41 pages) reads the selected tenant. Non-super_admins are ignored,
-		// so a tenant admin can never scope to another tenant.
-		if scope := strings.TrimSpace(c.GetHeader("X-Scope-Tenant-ID")); scope != "" && c.GetString("role") == "super_admin" {
-			c.Set("org_id", scope)
-			c.Set("user_org_id", scope)
-			c.Set("scoped_tenant", scope)
+		// Tenant scoping via the X-Scope-Tenant-ID header (set by the console's
+		// tenant switcher): override org_id so every org-scoped handler reads the
+		// selected tenant. Two roles may switch:
+		//   * super_admin — the manager-of-managers, into ANY tenant.
+		//   * an MSP operator — only into a tenant that belongs to their fleet
+		//     (operator match), so an operator can never scope into a rival's tenant.
+		// Everyone else is ignored — a plain tenant admin is locked to their org.
+		if scope := strings.TrimSpace(c.GetHeader("X-Scope-Tenant-ID")); scope != "" {
+			allow := c.GetString("role") == "super_admin"
+			if !allow {
+				if operator := c.GetString("operator_scope"); operator != "" {
+					if lookup, ok := v.(tenantOperatorLookup); ok {
+						if op, err := lookup.TenantOperator(c.Request.Context(), scope); err == nil && op == operator {
+							allow = true
+						}
+					}
+				}
+			}
+			if allow {
+				c.Set("org_id", scope)
+				c.Set("user_org_id", scope)
+				c.Set("scoped_tenant", scope)
+			}
 		}
 
 		c.Next()

@@ -24,6 +24,9 @@ type AuthUser struct {
 	Email         string     `json:"email"`
 	Name          string     `json:"name"`
 	Role          string     `json:"role"`
+	// OperatorScope is set for MSP operators: the user manages every org whose
+	// `operator` column equals this value. Empty for single-tenant users.
+	OperatorScope string     `json:"operator_scope,omitempty"`
 	MFAEnabled    bool       `json:"mfa_enabled"`
 	Status        string     `json:"status"`
 	OAuthProvider string     `json:"oauth_provider,omitempty"`
@@ -72,10 +75,10 @@ func (s *AuthStore) Authenticate(ctx context.Context, email, password, ipAddr, u
 	var passwordHash sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, email, name, role, mfa_enabled, status, password_hash
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status, password_hash
 		FROM system_mgmt.users
 		WHERE email = $1
-	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status, &passwordHash)
+	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status, &passwordHash)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
@@ -148,9 +151,9 @@ func (s *AuthStore) RefreshAccessToken(ctx context.Context, refreshToken string)
 	// Fetch user
 	var u AuthUser
 	err = s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, email, name, role, mfa_enabled, status
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status
 		FROM system_mgmt.users WHERE id = $1
-	`, userID).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status)
+	`, userID).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status)
 	if err != nil {
 		return nil, errors.New("user not found")
 	}
@@ -185,9 +188,9 @@ func (s *AuthStore) Logout(ctx context.Context, refreshToken string) error {
 func (s *AuthStore) GetUser(ctx context.Context, userID string) (*AuthUser, error) {
 	var u AuthUser
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, email, name, role, mfa_enabled, status, last_login_at
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status, last_login_at
 		FROM system_mgmt.users WHERE id = $1
-	`, userID).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status, &u.LastLoginAt)
+	`, userID).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status, &u.LastLoginAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("user not found")
 	}
@@ -222,10 +225,10 @@ func (s *AuthStore) FindOrCreateOAuthUser(ctx context.Context, provider, subject
 	// Try existing OAuth link first
 	var u AuthUser
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, email, name, role, mfa_enabled, status
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status
 		FROM system_mgmt.users
 		WHERE oauth_provider = $1 AND oauth_subject = $2
-	`, provider, subject).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status)
+	`, provider, subject).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status)
 
 	if err == nil {
 		// Existing user found — update last login
@@ -235,10 +238,10 @@ func (s *AuthStore) FindOrCreateOAuthUser(ctx context.Context, provider, subject
 
 	// Try matching by email (link existing account)
 	err = s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, email, name, role, mfa_enabled, status
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status
 		FROM system_mgmt.users
 		WHERE email = $1
-	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.MFAEnabled, &u.Status)
+	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status)
 
 	if err == nil {
 		// Link OAuth to existing email-based account
@@ -301,8 +304,26 @@ func (s *AuthStore) generateAccessToken(u *AuthUser) (string, error) {
 		"exp":    now.Add(15 * time.Minute).Unix(),
 		"iss":    "apexaegis-management-plane",
 	}
+	// MSP operators carry their operator scope so the middleware can widen the
+	// tenant-switch and the cross-tenant overview to their fleet (orgs WHERE
+	// operator = this value). Absent for single-tenant users.
+	if strings.TrimSpace(u.OperatorScope) != "" {
+		claims["operator_scope"] = u.OperatorScope
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(s.jwtSecret)
+}
+
+// TenantOperator returns the operator (service provider) that manages a tenant.
+// Used by the auth middleware to confirm an MSP operator may scope into a target
+// tenant (the tenant must belong to the operator's fleet). Returns sql.ErrNoRows
+// if the tenant does not exist.
+func (s *AuthStore) TenantOperator(ctx context.Context, tenantID string) (string, error) {
+	var operator string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(operator,'') FROM system_mgmt.organizations WHERE id = $1`, tenantID).
+		Scan(&operator)
+	return operator, err
 }
 
 func (s *AuthStore) generateRefreshToken(ctx context.Context, userID, ipAddr, userAgent string) (string, error) {
