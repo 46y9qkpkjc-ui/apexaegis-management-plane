@@ -363,6 +363,14 @@ func main() {
 		authAPI.GET("/sso/:idp_id/authorize", ssoHandler.Authorize)
 		authAPI.GET("/sso/callback", ssoHandler.CallbackRedirect)
 		authAPI.POST("/sso/callback", ssoHandler.Callback)
+
+		// Browser Kerberos SSO (SPNEGO/Negotiate) — silent sign-in for a
+		// domain-joined browser (e.g. April in her AD.APEXAEGIS.APP WorkSpace).
+		// Reuses the same offline keytab validator as the agent path; a nil
+		// validator (keytab not configured) makes /negotiate return 503.
+		negotiateHandler := handlers.NewNegotiateHandler(kerberosValidator, authStore, logger)
+		authAPI.GET("/negotiate", negotiateHandler.Negotiate)
+		authAPI.POST("/negotiate/exchange", negotiateHandler.Exchange)
 	}
 
 	// Client self-serve onboarding OTP API (public — no JWT; gated by emailed OTP).

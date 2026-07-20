@@ -344,6 +344,69 @@ func (s *AuthStore) generateRefreshToken(ctx context.Context, userID, ipAddr, us
 	return token, nil
 }
 
+// ResolveUserByEmail returns an active admin user by email (case-insensitive),
+// including operator_scope. Used to map an authenticated Kerberos principal
+// (user@REALM) to its ApexAegis user row. Returns sql.ErrNoRows if absent.
+func (s *AuthStore) ResolveUserByEmail(ctx context.Context, email string) (*AuthUser, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, sql.ErrNoRows
+	}
+	var u AuthUser
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, org_id, email, name, role, COALESCE(operator_scope,''), mfa_enabled, status
+		FROM system_mgmt.users WHERE lower(email) = $1
+	`, email).Scan(&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role, &u.OperatorScope, &u.MFAEnabled, &u.Status)
+	if err != nil {
+		return nil, err
+	}
+	if u.Status != "active" {
+		return nil, errors.New("account is suspended")
+	}
+	return &u, nil
+}
+
+// IssueKerberosCode mints a short-lived (2-minute) single-purpose code that the
+// browser carries back from the SPNEGO redirect and swaps for real tokens. It is
+// a signed JWT (typ=krb_code) so it is stateless — no server-side store, works
+// across MP tasks. The code only names the user; it is not itself a session.
+func (s *AuthStore) IssueKerberosCode(userID string) (string, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"sub": userID,
+		"typ": "krb_code",
+		"iat": now.Unix(),
+		"exp": now.Add(2 * time.Minute).Unix(),
+		"iss": "apexaegis-management-plane",
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtSecret)
+}
+
+// RedeemKerberosCode validates a Kerberos exchange code and returns the user ID.
+func (s *AuthStore) RedeemKerberosCode(code string) (string, error) {
+	token, err := jwt.Parse(code, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return s.jwtSecret, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return "", errors.New("invalid code")
+	}
+	if typ, _ := claims["typ"].(string); typ != "krb_code" {
+		return "", errors.New("not a kerberos code")
+	}
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return "", errors.New("code missing subject")
+	}
+	return sub, nil
+}
+
 // IssueTokens generates an access+refresh token pair for a user (used by SSO flow).
 func (s *AuthStore) IssueTokens(ctx context.Context, u *AuthUser, ipAddr, userAgent string) (*LoginResult, error) {
 	accessToken, err := s.generateAccessToken(u)
