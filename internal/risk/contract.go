@@ -35,8 +35,17 @@ const (
 type KeyScope string
 
 const (
-	ScopeETLD1 KeyScope = "etld1"
-	ScopeFQDN  KeyScope = "fqdn"
+	ScopeETLD1 KeyScope = "etld1" // registrable domain (the common case)
+	ScopeFQDN  KeyScope = "fqdn"  // shared-host suffix (github.io, s3.amazonaws.com, …) → per-owner
+	ScopeIP    KeyScope = "ip"    // IP-literal destination — no domain (ECH + IP-literal bypass)
+)
+
+// Event layers — where the PEP captured the destination. "ip" is a raw-IP flow
+// with no domain (DNS was never used); it is scored by IP/ASN reputation.
+const (
+	LayerDNS = "dns"
+	LayerSNI = "sni"
+	LayerIP  = "ip"
 )
 
 // Score bands (see the system prompt). Judgment may override within reason, so
@@ -65,7 +74,7 @@ func DecisionForScore(score int) Decision {
 // the "dns" and "sni" layers. The PEP always sends the full FQDN; the PDP
 // decides the cache-key granularity.
 type DomainEvent struct {
-	Domain     string    `json:"domain"`      // full FQDN as observed
+	Domain     string    `json:"domain"`      // full FQDN as observed — or an IP literal when layer="ip"
 	ClientID   string    `json:"client_id"`   // e.g. ws-april-01
 	User       string    `json:"user"`        // UPN / email
 	PostureRef string    `json:"posture_ref"` // compliance verdict handle from the PDP
