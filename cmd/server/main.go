@@ -368,7 +368,7 @@ func main() {
 		// domain-joined browser (e.g. April in her AD.APEXAEGIS.APP WorkSpace).
 		// Reuses the same offline keytab validator as the agent path; a nil
 		// validator (keytab not configured) makes /negotiate return 503.
-		negotiateHandler := handlers.NewNegotiateHandler(kerberosValidator, authStore, logger)
+		negotiateHandler := handlers.NewNegotiateHandler(kerberosValidator, authStore, os.Getenv("MP_KRB5_UPN_SUFFIX"), logger)
 		authAPI.GET("/negotiate", negotiateHandler.Negotiate)
 		authAPI.POST("/negotiate/exchange", negotiateHandler.Exchange)
 	}

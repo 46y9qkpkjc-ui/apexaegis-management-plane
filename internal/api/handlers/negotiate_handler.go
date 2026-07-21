@@ -29,11 +29,30 @@ import (
 type NegotiateHandler struct {
 	validator *security.KerberosValidator // nil when kerberos SSO is not configured
 	auth      *db.AuthStore
+	upnSuffix string // routable UPN suffix (e.g. "apexaegis.app") for principal→email fallback
 	logger    *zap.Logger
 }
 
-func NewNegotiateHandler(validator *security.KerberosValidator, auth *db.AuthStore, logger *zap.Logger) *NegotiateHandler {
-	return &NegotiateHandler{validator: validator, auth: auth, logger: logger}
+func NewNegotiateHandler(validator *security.KerberosValidator, auth *db.AuthStore, upnSuffix string, logger *zap.Logger) *NegotiateHandler {
+	return &NegotiateHandler{validator: validator, auth: auth, upnSuffix: strings.TrimSpace(upnSuffix), logger: logger}
+}
+
+// resolveUser maps an authenticated Kerberos identity to its admin user row.
+// AD tickets carry the account's realm (e.g. AD.APEXAEGIS.APP), which usually
+// differs from the routable UPN suffix (e.g. apexaegis.app) that seeded
+// users.email uses — so we try the exact principal first, then
+// sAMAccountName@<UPN suffix>.
+func (h *NegotiateHandler) resolveUser(c *gin.Context, id *security.KerberosIdentity) (*db.AuthUser, error) {
+	u, err := h.auth.ResolveUserByEmail(c.Request.Context(), id.Principal)
+	if err == nil {
+		return u, nil
+	}
+	if h.upnSuffix != "" && id.Username != "" {
+		if u2, err2 := h.auth.ResolveUserByEmail(c.Request.Context(), id.Username+"@"+h.upnSuffix); err2 == nil {
+			return u2, nil
+		}
+	}
+	return nil, err
 }
 
 // allowedRedirect guards against open redirects: only the ApexAegis web console
@@ -94,12 +113,12 @@ func (h *NegotiateHandler) Negotiate(c *gin.Context) {
 		return
 	}
 
-	// Map the authenticated principal (user@REALM) to its admin user row. The
-	// seeded users.email must equal the Kerberos principal for the demo cast.
-	user, err := h.auth.ResolveUserByEmail(c.Request.Context(), id.Principal)
+	// Map the authenticated principal to its admin user row (exact principal, then
+	// sAMAccountName@<UPN suffix>).
+	user, err := h.resolveUser(c, id)
 	if err != nil {
 		h.logger.Info("kerberos principal not provisioned as an admin user",
-			zap.String("principal", id.Principal))
+			zap.String("principal", id.Principal), zap.String("username", id.Username))
 		redirectWith(c, redirect, "sso_error", "principal_not_provisioned")
 		return
 	}

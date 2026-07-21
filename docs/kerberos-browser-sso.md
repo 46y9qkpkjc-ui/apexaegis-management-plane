@@ -55,10 +55,16 @@ OIDC / credentials.
    Note: `HTTP/api.apexaegis.app` — the browser requests a ticket for the host it
    navigates to (the MP), not the web-UI host.
 
-2. **MP env (from SSM).** The same three vars gate the agent and browser paths:
+2. **MP env (from SSM).** Keytab/SPN/realm gate the agent and browser paths;
+   the UPN suffix is browser-SSO only:
    - `MP_KRB5_KEYTAB_B64` — base64 keytab (SecureString).
    - `MP_KRB5_SPN` — `HTTP/api.apexaegis.app@AD.APEXAEGIS.APP`.
    - `MP_KRB5_REALM` — `AD.APEXAEGIS.APP` (enforced; a ticket from another realm is rejected).
+   - `MP_KRB5_UPN_SUFFIX` — `apexaegis.app`. The ticket principal is
+     `sAMAccountName@REALM` (`…@AD.APEXAEGIS.APP`), but seeded `users.email` uses the
+     routable UPN (`…@apexaegis.app`); this lets the handler fall back to
+     `sAMAccountName@<suffix>` when the exact principal doesn't match. Omit only if
+     the UPN suffix equals the realm.
 
 3. **Browser Integrated Auth (WorkSpace GPO / policy).** `api.apexaegis.app` must
    be trusted for Windows Integrated Auth so the browser sends the ticket:
@@ -68,12 +74,13 @@ OIDC / credentials.
      (and `AuthNegotiateDelegateAllowlist` if delegation is needed).
    Push via GPO to the WorkSpace image.
 
-4. **Seed the demo users so the principal resolves.** The handler maps the
-   authenticated Kerberos principal (`sAMAccountName@REALM`) to a `users` row via
-   `ResolveUserByEmail`, so **`users.email` must equal the principal**, e.g.
-   `april.woon@ad.apexaegis.app`. Seed April with `operator_scope='StarHub'`,
-   Samuel with none (see migration 044's template). No password is stored — these
-   users are AD-authenticated only.
+4. **Seed the demo users so the principal resolves** (migration 046). The handler
+   maps the Kerberos principal to a `users` row via `ResolveUserByEmail` — trying
+   the exact principal (`sAMAccountName@REALM`) then `sAMAccountName@<UPN suffix>`.
+   With `MP_KRB5_UPN_SUFFIX=apexaegis.app`, seed **`users.email` = the UPN**:
+   - April Woon → `april.woon.starhub@apexaegis.app`, `operator_scope='StarHub'`.
+   - Evelyn Ng  → `evelyn.ng.aspire@apexaegis.app`, no `operator_scope`.
+   No password is stored — these users are AD-authenticated only.
 
 ## Failure modes (surfaced to the login page as `?sso_error`)
 
