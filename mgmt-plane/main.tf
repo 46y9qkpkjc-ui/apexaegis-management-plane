@@ -718,6 +718,11 @@ resource "aws_ecs_task_definition" "mgmt" {
       # itself rides MP_KRB5_KEYTAB_B64 (SSM SecureString, in secrets below).
       { name = "MP_KRB5_SPN", value = "HTTP/api.apexaegis.app@AD.APEXAEGIS.APP" },
       { name = "MP_KRB5_REALM", value = "AD.APEXAEGIS.APP" },
+      # Browser SSO only: the routable UPN suffix. AD tickets carry the account's
+      # realm (AD.APEXAEGIS.APP), but seeded users.email uses the UPN suffix
+      # (apexaegis.app), so the Negotiate handler falls back to
+      # sAMAccountName@apexaegis.app when the exact principal doesn't match.
+      { name = "MP_KRB5_UPN_SUFFIX", value = "apexaegis.app" },
       # Cloud RADIUS (RadSec + EAP-TLS) listener address. Cert material rides the
       # RADSEC_*_PEM secrets below (SSM SecureStrings, out-of-band). With those unset
       # the RadSec server stays disabled and nothing else is affected.
