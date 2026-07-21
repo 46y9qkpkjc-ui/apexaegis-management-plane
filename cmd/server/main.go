@@ -39,6 +39,7 @@ import (
 	"github.com/zcp/management-plane/internal/policy"
 	"github.com/zcp/management-plane/internal/posture"
 	"github.com/zcp/management-plane/internal/radsec"
+	"github.com/zcp/management-plane/internal/risk"
 	"github.com/zcp/management-plane/internal/scanner"
 	"github.com/zcp/management-plane/internal/sdn"
 	"github.com/zcp/management-plane/internal/security"
@@ -829,6 +830,16 @@ func main() {
 		dot1xAPI.POST("/mac/register", dot1xHandler.RegisterMAC)
 		dot1xAPI.DELETE("/mac/:mac", dot1xHandler.RemoveMAC)
 		dot1xAPI.GET("/mac", dot1xHandler.ListMACs)
+	}
+
+	// SWG Domain-Risk PDP — the SWG PEP posts new public-domain events and gets
+	// an enforcement verdict (default-deny). Scorer is nil until P2 (the Claude
+	// risk agent); a cache MISS returns a provisional monitor/pending verdict.
+	pdpAPI := router.Group("/api/v1/pdp")
+	pdpAPI.Use(middleware.GatewayAuth(gwRegistry))
+	{
+		pdpHandler := handlers.NewPDPHandler(risk.NewService(risk.NewStore(dbConn.DB), nil, logger), logger)
+		pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
 	}
 
 	// Advanced Security Group Tags (SGT) & Branch Sites API
