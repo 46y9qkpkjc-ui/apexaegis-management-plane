@@ -21,6 +21,7 @@ func (f *fakeStore) ListMatch(context.Context, string, string) (string, string, 
 func (f *fakeStore) CachedVerdict(context.Context, string, string) (*EmitVerdict, time.Time, bool, error) {
 	return f.cached, f.cachedExp, f.cachedOK, nil
 }
+func (f *fakeStore) LogDecision(context.Context, string, DomainEvent, Verdict, string) error { return nil }
 
 type fakeScorer struct{ called bool }
 

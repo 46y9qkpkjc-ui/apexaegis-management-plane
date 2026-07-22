@@ -58,6 +58,23 @@ func (s *Store) CachedVerdict(ctx context.Context, orgID, key string) (*EmitVerd
 	return &v, expiresAt, true, nil
 }
 
+// LogDecision records one adjudication verdict to the risk_decisions audit log
+// (the feed for create-policy-from-log + create-ticket-from-log). category is the
+// AI's category when known (from emit_verdict), else "unknown".
+func (s *Store) LogDecision(ctx context.Context, orgID string, ev DomainEvent, v Verdict, category string) error {
+	if category == "" {
+		category = "unknown"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.risk_decisions
+		  (org_id, actor_user, client_id, domain, cache_key, key_scope, layer,
+		   decision, risk_score, source, category, rationale)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		orgID, ev.User, ev.ClientID, ev.Domain, v.Key, v.KeyScope, ev.Layer,
+		v.Decision, v.RiskScore, v.Source, category, v.Rationale)
+	return err
+}
+
 // PutVerdict upserts a scored verdict into the tenant-global cache with its TTL.
 func (s *Store) PutVerdict(ctx context.Context, orgID, key string, scope KeyScope, v *EmitVerdict, source Source, expiresAt time.Time) error {
 	factors, _ := json.Marshal(v.TopFactors)
