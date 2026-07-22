@@ -835,10 +835,13 @@ func main() {
 	// SWG Domain-Risk PDP — the SWG PEP posts new public-domain events and gets
 	// an enforcement verdict (default-deny). Scorer is nil until P2 (the Claude
 	// risk agent); a cache MISS returns a provisional monitor/pending verdict.
+	riskStore := risk.NewStore(dbConn.DB)
+	itsmStore := db.NewITSMStore(dbConn, logger)
+
 	pdpAPI := router.Group("/api/v1/pdp")
 	pdpAPI.Use(middleware.GatewayAuth(gwRegistry))
 	{
-		pdpHandler := handlers.NewPDPHandler(risk.NewService(risk.NewStore(dbConn.DB), nil, logger), logger)
+		pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, nil, logger), logger)
 		pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
 	}
 
@@ -847,10 +850,21 @@ func main() {
 	itsmAPI := router.Group("/api/v1/admin/itsm")
 	itsmAPI.Use(middleware.JWTAuth(authStore))
 	{
-		itsmHandler := handlers.NewITSMHandler(db.NewITSMStore(dbConn, logger), logger)
+		itsmHandler := handlers.NewITSMHandler(itsmStore, logger)
 		itsmAPI.GET("/tickets", itsmHandler.ListTickets)
 		itsmAPI.POST("/tickets", itsmHandler.CreateTicket)
 		itsmAPI.POST("/tickets/:id/status", itsmHandler.UpdateTicketStatus)
+	}
+
+	// Agentic risk-ops — the decision log + create-policy-from-log and
+	// create-ticket-from-log, operator+tenant scoped.
+	riskOpsAPI := router.Group("/api/v1/admin/risk")
+	riskOpsAPI.Use(middleware.JWTAuth(authStore))
+	{
+		opsHandler := handlers.NewRiskOpsHandler(riskStore, itsmStore, logger)
+		riskOpsAPI.GET("/decisions", opsHandler.ListDecisions)
+		riskOpsAPI.POST("/decisions/:id/promote-policy", opsHandler.PromoteToPolicy)
+		riskOpsAPI.POST("/decisions/:id/create-ticket", opsHandler.TicketFromDecision)
 	}
 
 	// Advanced Security Group Tags (SGT) & Branch Sites API

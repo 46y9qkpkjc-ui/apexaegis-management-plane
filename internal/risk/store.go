@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -72,6 +73,100 @@ func (s *Store) LogDecision(ctx context.Context, orgID string, ev DomainEvent, v
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		orgID, ev.User, ev.ClientID, ev.Domain, v.Key, v.KeyScope, ev.Layer,
 		v.Decision, v.RiskScore, v.Source, category, v.Rationale)
+	return err
+}
+
+// DecisionRow is one risk_decisions log row for the console (with tenant + operator
+// resolved via the organizations join).
+type DecisionRow struct {
+	ID          string `json:"id"`
+	TenantID    string `json:"tenant_id"`
+	TenantName  string `json:"tenant_name"`
+	Operator    string `json:"operator"`
+	Domain      string `json:"domain"`
+	CacheKey    string `json:"cache_key"`
+	KeyScope    string `json:"key_scope"`
+	ActorUser   string `json:"actor_user"`
+	Decision    string `json:"decision"`
+	RiskScore   int    `json:"risk_score"`
+	Source      string `json:"source"`
+	Category    string `json:"category"`
+	Rationale   string `json:"rationale"`
+	ActionedAs  string `json:"actioned_as"`
+	ActionedRef string `json:"actioned_ref"`
+	CreatedAt   string `json:"created_at"`
+}
+
+const decisionCols = `rd.id, rd.org_id::text, o.name, COALESCE(o.operator,'ApexAegis (direct)'),
+	rd.domain, rd.cache_key, rd.key_scope, rd.actor_user, rd.decision, rd.risk_score,
+	rd.source, rd.category, rd.rationale, rd.actioned_as, rd.actioned_ref, rd.created_at::text`
+
+func scanDecision(scan func(...any) error) (DecisionRow, error) {
+	var d DecisionRow
+	err := scan(&d.ID, &d.TenantID, &d.TenantName, &d.Operator, &d.Domain, &d.CacheKey, &d.KeyScope,
+		&d.ActorUser, &d.Decision, &d.RiskScore, &d.Source, &d.Category, &d.Rationale,
+		&d.ActionedAs, &d.ActionedRef, &d.CreatedAt)
+	return d, err
+}
+
+// ListDecisions returns the risk decision log for the caller's scope (operator
+// fleet / own org / all), newest first.
+func (s *Store) ListDecisions(ctx context.Context, operator, orgID string, limit int) ([]DecisionRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	q := `SELECT ` + decisionCols + `
+	      FROM system_mgmt.risk_decisions rd JOIN system_mgmt.organizations o ON o.id = rd.org_id
+	      WHERE 1=1`
+	args := []interface{}{}
+	if operator != "" {
+		args = append(args, operator)
+		q += fmt.Sprintf(" AND COALESCE(o.operator,'ApexAegis (direct)') = $%d", len(args))
+	} else if orgID != "" {
+		args = append(args, orgID)
+		q += fmt.Sprintf(" AND rd.org_id = $%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY rd.created_at DESC LIMIT $%d", len(args))
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DecisionRow{}
+	for rows.Next() {
+		d, err := scanDecision(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetDecision fetches one decision (any tenant); the caller checks scope via the
+// returned TenantID + Operator.
+func (s *Store) GetDecision(ctx context.Context, id string) (DecisionRow, error) {
+	return scanDecision(s.db.QueryRowContext(ctx, `SELECT `+decisionCols+`
+		FROM system_mgmt.risk_decisions rd JOIN system_mgmt.organizations o ON o.id = rd.org_id
+		WHERE rd.id = $1`, id).Scan)
+}
+
+// MarkActioned records that a decision was promoted to a policy or a ticket.
+func (s *Store) MarkActioned(ctx context.Context, id, kind, ref string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE system_mgmt.risk_decisions SET actioned_as=$2, actioned_ref=$3 WHERE id=$1`, id, kind, ref)
+	return err
+}
+
+// PromoteAllow adds a tenant allowlist entry (the prefilter list) so future flows
+// to this domain short-circuit to ALLOW — "create policy from log" for the risk
+// engine. Idempotent.
+func (s *Store) PromoteAllow(ctx context.Context, orgID, key string, scope KeyScope, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.domain_list_entries (org_id, list_type, cache_key, key_scope, reason, source)
+		VALUES ($1,'allow',$2,$3,$4,'promoted')
+		ON CONFLICT DO NOTHING`, orgID, key, scope, reason)
 	return err
 }
 
