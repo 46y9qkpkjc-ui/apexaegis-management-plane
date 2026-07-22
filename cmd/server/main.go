@@ -842,6 +842,17 @@ func main() {
 		pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
 	}
 
+	// Internal ITSM — native service/change requests (a 3rd routing target
+	// beside JIRA/ServiceNow), operator+tenant scoped. Console-facing (JWT).
+	itsmAPI := router.Group("/api/v1/admin/itsm")
+	itsmAPI.Use(middleware.JWTAuth(authStore))
+	{
+		itsmHandler := handlers.NewITSMHandler(db.NewITSMStore(dbConn, logger), logger)
+		itsmAPI.GET("/tickets", itsmHandler.ListTickets)
+		itsmAPI.POST("/tickets", itsmHandler.CreateTicket)
+		itsmAPI.POST("/tickets/:id/status", itsmHandler.UpdateTicketStatus)
+	}
+
 	// Advanced Security Group Tags (SGT) & Branch Sites API
 	sgtAPI := router.Group("/api/v1/sgt")
 	sgtAPI.Use(middleware.JWTAuth(authStore))
