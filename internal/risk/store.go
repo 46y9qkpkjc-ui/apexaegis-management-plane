@@ -95,18 +95,42 @@ type DecisionRow struct {
 	ActionedAs  string `json:"actioned_as"`
 	ActionedRef string `json:"actioned_ref"`
 	CreatedAt   string `json:"created_at"`
+	// Rich verdict fields for the risk-score card, LEFT JOINed from the live
+	// tenant-global cache (domain_verdicts) by (org_id, cache_key). Present while
+	// the verdict is still cached; empty once it expires/evicts (the core decision
+	// above is always present). For a re-adjudicated domain these reflect the
+	// current cached verdict, which is the one enforcement is actually using.
+	Confidence string          `json:"confidence"`
+	TopFactors []string        `json:"top_factors"`
+	Signals    json.RawMessage `json:"signals"`
+	ToolsRan   []string        `json:"tools_ran"`
 }
 
 const decisionCols = `rd.id, rd.org_id::text, o.name, COALESCE(o.operator,'ApexAegis (direct)'),
 	rd.domain, rd.cache_key, rd.key_scope, rd.actor_user, rd.decision, rd.risk_score,
-	rd.source, rd.category, rd.rationale, rd.actioned_as, rd.actioned_ref, rd.created_at::text`
+	rd.source, rd.category, rd.rationale, rd.actioned_as, rd.actioned_ref, rd.created_at::text,
+	COALESCE(dv.confidence,''), COALESCE(dv.top_factors,'[]'), COALESCE(dv.signals,'{}'), COALESCE(dv.tools_ran,'[]')`
+
+// decisionFrom joins the decision log to the org (tenant/operator) and LEFT JOINs
+// the live verdict cache for the card's rich fields.
+const decisionFrom = `FROM system_mgmt.risk_decisions rd
+	JOIN system_mgmt.organizations o ON o.id = rd.org_id
+	LEFT JOIN system_mgmt.domain_verdicts dv ON dv.org_id = rd.org_id AND dv.cache_key = rd.cache_key`
 
 func scanDecision(scan func(...any) error) (DecisionRow, error) {
 	var d DecisionRow
+	var factors, signals, toolsRan []byte
 	err := scan(&d.ID, &d.TenantID, &d.TenantName, &d.Operator, &d.Domain, &d.CacheKey, &d.KeyScope,
 		&d.ActorUser, &d.Decision, &d.RiskScore, &d.Source, &d.Category, &d.Rationale,
-		&d.ActionedAs, &d.ActionedRef, &d.CreatedAt)
-	return d, err
+		&d.ActionedAs, &d.ActionedRef, &d.CreatedAt,
+		&d.Confidence, &factors, &signals, &toolsRan)
+	if err != nil {
+		return d, err
+	}
+	_ = json.Unmarshal(factors, &d.TopFactors)
+	_ = json.Unmarshal(toolsRan, &d.ToolsRan)
+	d.Signals = json.RawMessage(signals) // passthrough object for the card
+	return d, nil
 }
 
 // ListDecisions returns the risk decision log for the caller's scope (operator
@@ -116,7 +140,7 @@ func (s *Store) ListDecisions(ctx context.Context, operator, orgID string, limit
 		limit = 200
 	}
 	q := `SELECT ` + decisionCols + `
-	      FROM system_mgmt.risk_decisions rd JOIN system_mgmt.organizations o ON o.id = rd.org_id
+	      ` + decisionFrom + `
 	      WHERE 1=1`
 	args := []interface{}{}
 	if operator != "" {
@@ -148,7 +172,7 @@ func (s *Store) ListDecisions(ctx context.Context, operator, orgID string, limit
 // returned TenantID + Operator.
 func (s *Store) GetDecision(ctx context.Context, id string) (DecisionRow, error) {
 	return scanDecision(s.db.QueryRowContext(ctx, `SELECT `+decisionCols+`
-		FROM system_mgmt.risk_decisions rd JOIN system_mgmt.organizations o ON o.id = rd.org_id
+		`+decisionFrom+`
 		WHERE rd.id = $1`, id).Scan)
 }
 
