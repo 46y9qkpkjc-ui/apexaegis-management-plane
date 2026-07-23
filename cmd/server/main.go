@@ -838,10 +838,18 @@ func main() {
 	riskStore := risk.NewStore(dbConn.DB)
 	itsmStore := db.NewITSMStore(dbConn, logger)
 
+	// The Claude risk scorer (P2) runs on a cache MISS, async off the packet path.
+	// nil (no ANTHROPIC_API_KEY) → MISS returns a provisional monitor/pending only.
+	var riskScorer risk.Scorer
+	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+		riskScorer = risk.NewAgent(k, riskStore, logger)
+		logger.Info("risk agent enabled (Claude domain scorer)")
+	}
+
 	pdpAPI := router.Group("/api/v1/pdp")
 	pdpAPI.Use(middleware.GatewayAuth(gwRegistry))
 	{
-		pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, nil, logger), logger)
+		pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, riskScorer, logger), logger)
 		pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
 	}
 
