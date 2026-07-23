@@ -333,6 +333,37 @@ func IntegrityDiff(baseline, current map[string]string) (modified, added, remove
 	return modified, added, removed
 }
 
+// LatestComplianceForCert returns the compliance verdict from the most recent
+// posture report of the device bearing the given mTLS cert SHA-256 — the stable
+// identity BOTH /agent/auth (token minting) and /client/posture (report storage)
+// authenticate with. Keying on the cert fingerprint (rather than a device-row id)
+// avoids the mismatch where the two endpoints resolve different device rows for
+// the same certificate (register-by-device_id vs validate-by-fingerprint), which
+// left tokens stamped compliant:false despite live compliant reports. No report
+// yet => (false, "unknown", nil).
+func (s *DeviceStore) LatestComplianceForCert(ctx context.Context, orgID, certFingerprintSHA256 string) (bool, string, error) {
+	if orgID == "" || certFingerprintSHA256 == "" {
+		return false, "unknown", nil
+	}
+	var compliant bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT pr.compliant
+		FROM system_mgmt.device_posture_reports pr
+		JOIN system_mgmt.devices d ON d.id = pr.device_id
+		WHERE d.org_id = $1 AND d.mtls_cert_fingerprint_sha256 = $2
+		ORDER BY pr.checked_at DESC LIMIT 1`, orgID, certFingerprintSHA256).Scan(&compliant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "unknown", nil
+	}
+	if err != nil {
+		return false, "unknown", err
+	}
+	if compliant {
+		return true, "compliant", nil
+	}
+	return false, "non_compliant", nil
+}
+
 // LatestComplianceForDevice returns the compliance verdict from the device's most
 // recent posture report, for stamping the agent token (ZTNA posture gate). No report
 // yet => (false, "unknown", nil) — an un-attested device is not treated as compliant.

@@ -104,8 +104,11 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 	// domain_joined token via the Kerberos SSO flow; the gateway also admits
 	// linked domain devices via their UPN / "Domain Users" group.
 	// Device compliance from its latest posture report → stamped into the token so
-	// the gateway can enforce a posture-admission gate (ZTNA).
-	compliant, complianceStatus, cerr := h.deviceStore.LatestComplianceForDevice(c.Request.Context(), req.TenantID, reg.ID)
+	// the gateway can enforce a posture-admission gate (ZTNA). Keyed on the mTLS
+	// cert fingerprint (the identity /client/posture also authenticates with), so
+	// the report is found even when register-by-device_id and validate-by-cert
+	// resolve different device rows for the same certificate.
+	compliant, complianceStatus, cerr := h.deviceStore.LatestComplianceForCert(c.Request.Context(), req.TenantID, identity.FingerprintSHA256)
 	if cerr != nil {
 		h.logger.Warn("failed to resolve device compliance", zap.String("device_id", deviceID), zap.Error(cerr))
 	}
