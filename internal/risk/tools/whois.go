@@ -161,27 +161,33 @@ func (whoisTool) Definition() ToolDef {
 }
 
 func (w whoisTool) Run(ctx context.Context, _, etld1 string) (json.RawMessage, error) {
-	url := "https://rdap.org/domain/" + etld1
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	return json.Marshal(fetchRDAP(ctx, w.http, etld1, w.now()))
+}
+
+// fetchRDAP queries the RDAP redirector and parses the domain record. Shared by
+// whois_lookup and nrd_check. Errors are returned in-band (Error field) so the
+// agent sees a tool result rather than a failure.
+func fetchRDAP(ctx context.Context, client *http.Client, etld1 string, now time.Time) WhoisResult {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://rdap.org/domain/"+etld1, nil)
 	if err != nil {
-		return json.Marshal(WhoisResult{RegistrableDomain: etld1, Error: err.Error()})
+		return WhoisResult{RegistrableDomain: etld1, Error: err.Error()}
 	}
 	req.Header.Set("Accept", "application/rdap+json")
-	resp, err := w.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return json.Marshal(WhoisResult{RegistrableDomain: etld1, Error: err.Error()})
+		return WhoisResult{RegistrableDomain: etld1, Error: err.Error()}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return json.Marshal(WhoisResult{RegistrableDomain: etld1, Error: fmt.Sprintf("rdap status %d", resp.StatusCode)})
+		return WhoisResult{RegistrableDomain: etld1, Error: fmt.Sprintf("rdap status %d", resp.StatusCode)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return json.Marshal(WhoisResult{RegistrableDomain: etld1, Error: err.Error()})
+		return WhoisResult{RegistrableDomain: etld1, Error: err.Error()}
 	}
-	res, err := ParseRDAP(body, w.now())
+	res, err := ParseRDAP(body, now)
 	if err != nil {
-		return json.Marshal(WhoisResult{RegistrableDomain: etld1, Error: "parse: " + err.Error()})
+		return WhoisResult{RegistrableDomain: etld1, Error: "parse: " + err.Error()}
 	}
-	return json.Marshal(res)
+	return res
 }

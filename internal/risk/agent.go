@@ -56,13 +56,20 @@ type Agent struct {
 	logger *zap.Logger
 }
 
-// NewAgent builds the scorer. Currently wires the keyless real tools (DGA + RDAP
-// whois); credentialed tools (reputation/geo/passive-DNS) register here as keys land.
+// NewAgent builds the scorer with the keyless real tools: dga_score (pure compute),
+// whois_lookup + nrd_check (RDAP via rdap.org), and geo_lookup (ip-api.com free
+// endpoint). The remaining credentialed tools — domain_reputation (threat-intel
+// feed) and nod_check (passive-DNS) — register here once their keys land.
 func NewAgent(apiKey string, store *Store, logger *zap.Logger) *Agent {
 	return &Agent{
 		client: anthropic.NewClient(option.WithAPIKey(apiKey)),
 		model:  anthropic.ModelClaudeOpus4_8,
-		tools:  []tools.Tool{tools.NewDGATool(), tools.NewWhoisTool()},
+		tools: []tools.Tool{
+			tools.NewDGATool(),
+			tools.NewWhoisTool(),
+			tools.NewNRDTool(),
+			tools.NewGeoTool(),
+		},
 		store:  store,
 		logger: logger,
 	}
