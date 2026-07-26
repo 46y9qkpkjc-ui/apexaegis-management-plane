@@ -1,54 +1,60 @@
 package tools
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
-// parseAS, classifyHosting and rateAbuse are the network-free pieces of geo_lookup
-// — lock the ip-api field mapping and the hosting/abuse heuristics.
-func TestParseAS(t *testing.T) {
-	cases := []struct {
-		in    string
-		num   int
-		owner string
-	}{
-		{"AS15169 Google LLC", 15169, "Google LLC"},
-		{"AS13335 Cloudflare, Inc.", 13335, "Cloudflare, Inc."},
-		{"AS14618", 14618, ""},
-		{"", 0, ""},
-	}
-	for _, c := range cases {
-		n, o := parseAS(c.in)
-		if n != c.num || o != c.owner {
-			t.Errorf("parseAS(%q) = (%d,%q), want (%d,%q)", c.in, n, o, c.num, c.owner)
-		}
-	}
-}
-
+// classifyHosting and rateAbuse are the network-free heuristics of geo_lookup —
+// lock the owner-string classification, including the anonymizer path that
+// replaces ip-api's paid proxy flag.
 func TestClassifyHosting(t *testing.T) {
 	cases := []struct {
-		info ipAPIResp
-		want string
+		owner string
+		want  string
 	}{
-		{ipAPIResp{AS: "AS13335 Cloudflare, Inc."}, "cdn"},
-		{ipAPIResp{Org: "Amazon.com, Inc.", Hosting: true}, "cloud"},
-		{ipAPIResp{Org: "DigitalOcean, LLC"}, "cloud"},
-		{ipAPIResp{ISP: "Comcast Cable", Mobile: true}, "residential"},
-		{ipAPIResp{Org: "Some Small ISP"}, "unknown"},
+		{"cloudflare, inc.", "cdn"},
+		{"amazon.com, inc.", "cloud"},
+		{"digitalocean, llc", "cloud"},
+		{"nordvpn s.a.", "hosting"},
+		{"m247 europe srl", "hosting"},
+		{"some small isp", "unknown"},
 	}
 	for _, c := range cases {
-		if got := classifyHosting(c.info); got != c.want {
-			t.Errorf("classifyHosting(%+v) = %q, want %q", c.info, got, c.want)
+		if got := classifyHosting(c.owner); got != c.want {
+			t.Errorf("classifyHosting(%q) = %q, want %q", c.owner, got, c.want)
 		}
 	}
 }
 
 func TestRateAbuse(t *testing.T) {
-	if got := rateAbuse(ipAPIResp{Proxy: true, Org: "Amazon"}); got != "high" {
-		t.Errorf("proxy should rate high, got %q", got)
+	if got := rateAbuse("mullvad vpn ab"); got != "high" {
+		t.Errorf("anonymizer should rate high, got %q", got)
 	}
-	if got := rateAbuse(ipAPIResp{AS: "AS15169 Google LLC"}); got != "low" {
+	if got := rateAbuse("google llc"); got != "low" {
 		t.Errorf("mainstream cloud should rate low, got %q", got)
 	}
-	if got := rateAbuse(ipAPIResp{Org: "Obscure Hosting Ltd"}); got != "unknown" {
+	if got := rateAbuse("obscure hosting ltd"); got != "unknown" {
 		t.Errorf("unknown network should rate unknown (not low), got %q", got)
+	}
+}
+
+// The TTL cache must hit within the window and miss after it — this is what keeps
+// us under the keyless provider's rate limit.
+func TestGeoCache(t *testing.T) {
+	c := newGeoCache()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	want := ipwhoResp{Success: true, CountryCode: "US"}
+	want.Connection.ASN = 15169
+	c.put("1.2.3.4", want, base)
+
+	if got, ok := c.get("1.2.3.4", base.Add(time.Hour)); !ok || got.Connection.ASN != 15169 {
+		t.Errorf("expected cache hit within TTL, ok=%v got=%+v", ok, got)
+	}
+	if _, ok := c.get("1.2.3.4", base.Add(geoCacheTTL+time.Minute)); ok {
+		t.Error("expected cache miss after TTL")
+	}
+	if _, ok := c.get("9.9.9.9", base); ok {
+		t.Error("expected miss for absent key")
 	}
 }

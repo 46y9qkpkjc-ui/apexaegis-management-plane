@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,30 +23,93 @@ type GeoResult struct {
 	Error             string   `json:"error,omitempty"`
 }
 
-// ipAPIResp is the subset we read from ip-api.com's free JSON endpoint.
-type ipAPIResp struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-	Country string `json:"countryCode"`
-	AS      string `json:"as"`  // "AS15169 Google LLC"
-	Org     string `json:"org"` // network owner
-	ISP     string `json:"isp"`
-	Hosting bool   `json:"hosting"`
-	Proxy   bool   `json:"proxy"`
-	Mobile  bool   `json:"mobile"`
+// ipwhoResp is the subset we read from ipwho.is — keyless and, unlike ip-api's
+// free tier, available over HTTPS (the MP must not leak which IPs it is scoring
+// over plaintext).
+type ipwhoResp struct {
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	CountryCode string `json:"country_code"`
+	Connection  struct {
+		ASN int    `json:"asn"`
+		Org string `json:"org"`
+		ISP string `json:"isp"`
+	} `json:"connection"`
 }
 
-// geoTool resolves the host and enriches the primary IP via ip-api.com's free
-// endpoint (no API key, no local DB — swappable for MaxMind GeoLite2 / a paid ASN
-// feed once keys land). It answers "where and on whose network is this hosted",
-// which separates mainstream CDN/cloud from bulletproof/anonymizer hosting.
+// owner returns the searchable network-owner string for heuristic matching.
+func (r ipwhoResp) owner() string {
+	return strings.ToLower(r.Connection.Org + " " + r.Connection.ISP)
+}
+
+const (
+	geoCacheTTL = 6 * time.Hour // ASN/country for an IP is stable; refresh rarely
+	geoCacheMax = 4096
+)
+
+type geoCacheEntry struct {
+	info ipwhoResp
+	exp  time.Time
+}
+
+// geoCache is a small bounded TTL cache of IP -> geo. The provider's keyless tier
+// is rate-limited, and popular destinations resolve to the same IPs across every
+// tenant, so caching keeps us far below any limit.
+type geoCache struct {
+	mu sync.Mutex
+	m  map[string]geoCacheEntry
+}
+
+func newGeoCache() *geoCache { return &geoCache{m: map[string]geoCacheEntry{}} }
+
+func (c *geoCache) get(ip string, now time.Time) (ipwhoResp, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[ip]
+	if !ok || now.After(e.exp) {
+		return ipwhoResp{}, false
+	}
+	return e.info, true
+}
+
+func (c *geoCache) put(ip string, info ipwhoResp, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= geoCacheMax {
+		for k, e := range c.m { // drop expired first
+			if now.After(e.exp) {
+				delete(c.m, k)
+			}
+		}
+		for k := range c.m { // still full: shed arbitrary entries
+			if len(c.m) < geoCacheMax {
+				break
+			}
+			delete(c.m, k)
+		}
+	}
+	c.m[ip] = geoCacheEntry{info: info, exp: now.Add(geoCacheTTL)}
+}
+
+// geoTool resolves the host and enriches the primary IP via ipwho.is (HTTPS, no
+// API key). It answers "where and on whose network is this hosted", which
+// separates mainstream CDN/cloud from anonymizer/bulletproof hosting. Swap in
+// MaxMind GeoLite2 (local .mmdb, no network, no rate limit) by replacing
+// lookupIP once the database is available.
 type geoTool struct {
 	http     *http.Client
 	resolver *net.Resolver
+	cache    *geoCache
+	now      func() time.Time
 }
 
 func NewGeoTool() Tool {
-	return geoTool{http: &http.Client{Timeout: 6 * time.Second}, resolver: net.DefaultResolver}
+	return geoTool{
+		http:     &http.Client{Timeout: 6 * time.Second},
+		resolver: net.DefaultResolver,
+		cache:    newGeoCache(),
+		now:      time.Now,
+	}
 }
 
 func (geoTool) Name() string { return "geo_lookup" }
@@ -87,89 +150,79 @@ func (g geoTool) Run(ctx context.Context, fqdn, etld1 string) (json.RawMessage, 
 		res.Error = "geo: " + err.Error()
 		return json.Marshal(res)
 	}
-	res.HostingCountry = info.Country
-	res.ASN, res.ASNOwner = parseAS(info.AS)
-	if res.ASNOwner == "" {
-		res.ASNOwner = firstNonEmpty(info.Org, info.ISP)
-	}
-	res.HostingType = classifyHosting(info)
-	res.ASNAbuse = rateAbuse(info)
+	res.HostingCountry = info.CountryCode
+	res.ASN = info.Connection.ASN
+	res.ASNOwner = firstNonEmpty(info.Connection.Org, info.Connection.ISP)
+	res.HostingType = classifyHosting(info.owner())
+	res.ASNAbuse = rateAbuse(info.owner())
 	return json.Marshal(res)
 }
 
-func (g geoTool) lookupIP(ctx context.Context, ip string) (ipAPIResp, error) {
-	// Free endpoint: HTTP only, no key, ~45 req/min. fields mask keeps the response small.
-	url := "http://ip-api.com/json/" + ip + "?fields=status,message,countryCode,as,org,isp,hosting,proxy,mobile"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (g geoTool) lookupIP(ctx context.Context, ip string) (ipwhoResp, error) {
+	now := g.now()
+	if cached, ok := g.cache.get(ip, now); ok {
+		return cached, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipwho.is/"+ip, nil)
 	if err != nil {
-		return ipAPIResp{}, err
+		return ipwhoResp{}, err
 	}
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return ipAPIResp{}, err
+		return ipwhoResp{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ipAPIResp{}, fmt.Errorf("ip-api status %d", resp.StatusCode)
+		return ipwhoResp{}, fmt.Errorf("ipwho status %d", resp.StatusCode)
 	}
-	var out ipAPIResp
+	var out ipwhoResp
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ipAPIResp{}, err
+		return ipwhoResp{}, err
 	}
-	if out.Status != "success" {
-		return ipAPIResp{}, fmt.Errorf("ip-api: %s", firstNonEmpty(out.Message, "lookup failed"))
+	if !out.Success {
+		return ipwhoResp{}, fmt.Errorf("ipwho: %s", firstNonEmpty(out.Message, "lookup failed"))
 	}
+	g.cache.put(ip, out, now)
 	return out, nil
 }
 
-// parseAS splits ip-api's "AS15169 Google LLC" into (15169, "Google LLC").
-func parseAS(as string) (int, string) {
-	as = strings.TrimSpace(as)
-	if as == "" {
-		return 0, ""
-	}
-	num, owner := as, ""
-	if i := strings.IndexByte(as, ' '); i > 0 {
-		num, owner = as[:i], strings.TrimSpace(as[i+1:])
-	}
-	n, _ := strconv.Atoi(strings.TrimPrefix(strings.ToUpper(num), "AS"))
-	return n, owner
-}
-
-// cdnOwners / cloudOwners are substring markers for well-known networks. Presence
-// here is a benign signal (mainstream infra); absence is not itself suspicious.
-var cdnOwners = []string{"cloudflare", "akamai", "fastly", "cloudfront", "amazon cloudfront", "edgecast", "limelight", "stackpath"}
+// Network-owner substring markers. Mainstream CDN/cloud presence is a benign
+// signal; absence is not itself suspicious (we return "unknown", never "low").
+var cdnOwners = []string{"cloudflare", "akamai", "fastly", "cloudfront", "edgecast", "limelight", "stackpath"}
 var cloudOwners = []string{"amazon", "aws", "google", "microsoft", "azure", "digitalocean", "linode", "ovh", "hetzner", "vultr", "oracle cloud", "alibaba"}
 
-func classifyHosting(info ipAPIResp) string {
-	owner := strings.ToLower(info.Org + " " + info.AS + " " + info.ISP)
-	if containsAny(owner, cdnOwners) {
-		return "cdn"
-	}
-	if info.Hosting || containsAny(owner, cloudOwners) {
-		return "cloud"
-	}
-	if info.Mobile {
-		return "residential"
-	}
-	if info.Hosting {
-		return "hosting"
-	}
-	return "unknown"
+// anonymizerOwners are networks whose business is hiding origin (commercial VPN,
+// Tor, and hosts repeatedly named in bulletproof-hosting reporting). A hit here
+// is the strongest hosting-side risk signal we can derive without a paid abuse
+// feed — it replaces the `proxy` flag that ip-api gates behind a key.
+var anonymizerOwners = []string{
+	"nordvpn", "expressvpn", "mullvad", "private internet access", "surfshark", "cyberghost",
+	"ipvanish", "protonvpn", "torguard", "windscribe", "tor exit", "tor network",
+	"m247", "datacamp limited", "flokinet", "njalla", "ababil", "stark industries",
 }
 
-// rateAbuse is a coarse, honest rating without a paid abuse feed: anonymizing
-// infrastructure (proxy/VPN/Tor per ip-api) rates high; recognized mainstream
-// CDN/cloud rates low; everything else is unknown (NOT low — absence of evidence).
-func rateAbuse(info ipAPIResp) string {
-	if info.Proxy {
+func classifyHosting(owner string) string {
+	switch {
+	case containsAny(owner, cdnOwners):
+		return "cdn"
+	case containsAny(owner, cloudOwners):
+		return "cloud"
+	case containsAny(owner, anonymizerOwners):
+		return "hosting"
+	default:
+		return "unknown"
+	}
+}
+
+func rateAbuse(owner string) string {
+	switch {
+	case containsAny(owner, anonymizerOwners):
 		return "high"
-	}
-	owner := strings.ToLower(info.Org + " " + info.AS + " " + info.ISP)
-	if containsAny(owner, cdnOwners) || containsAny(owner, cloudOwners) {
+	case containsAny(owner, cdnOwners), containsAny(owner, cloudOwners):
 		return "low"
+	default:
+		return "unknown" // absence of evidence, not evidence of absence
 	}
-	return "unknown"
 }
 
 func containsAny(s string, subs []string) bool {
