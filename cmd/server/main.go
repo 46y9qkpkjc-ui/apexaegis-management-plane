@@ -858,7 +858,10 @@ func main() {
 	pdpDeviceAPI := router.Group("/api/v1/pdp")
 	pdpDeviceAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	pdpDeviceAPI.POST("/resolve", pdpHandler.Resolve)
-	pdpDeviceAPI.GET("/verdicts/stream", pdpHandler.Verdicts) // SSE: endpoint DNS PEP subscription
+	// Distinct path from the gateway's /verdicts/stream — gin panics on a duplicate
+	// method+path, and these are two different auth groups on the same /api/v1/pdp
+	// prefix. Same handler; the endpoint DNS PEP subscribes here over device-mTLS.
+	pdpDeviceAPI.GET("/verdicts/subscribe", pdpHandler.Verdicts) // SSE: endpoint DNS PEP subscription
 
 	// Internal ITSM — native service/change requests (a 3rd routing target
 	// beside JIRA/ServiceNow), operator+tenant scoped. Console-facing (JWT).
