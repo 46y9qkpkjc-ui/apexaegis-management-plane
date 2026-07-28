@@ -443,7 +443,7 @@ type AgentTokenPosture struct {
 
 // IssueAgentToken generates a short-lived JWT bound to a registered device
 // certificate. Gateways compare these claims with the verified TLS peer cert.
-func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string, domain AgentTokenDomain, posture AgentTokenPosture) (string, time.Time, error) {
+func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, certSerial string, groups []string, domain AgentTokenDomain, posture AgentTokenPosture, loginUser string) (string, time.Time, error) {
 	now := time.Now()
 	expiresAt := now.Add(15 * time.Minute)
 	if deviceID == "" {
@@ -481,12 +481,42 @@ func (s *AuthStore) IssueAgentToken(orgID, deviceID, certFingerprintSHA256, cert
 	if strings.TrimSpace(posture.Status) != "" {
 		claims["compliance_status"] = posture.Status
 	}
+	// Attribute gateway traffic to the interactive user the agent reported
+	// (device-reported, NOT IdP-verified). Stamped as user_id so the gateway's
+	// ClientIdentity.UserID → SWG → domain-event → risk_decisions.actor_user shows
+	// the human at the keyboard. upn stays reserved for the Kerberos-verified path.
+	if lu := sanitizeLoginUser(loginUser); lu != "" {
+		claims["user_id"] = lu
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.jwtSecret)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	return signed, expiresAt, nil
+}
+
+// sanitizeLoginUser cleans a device-reported console username for use as a JWT
+// claim: trims whitespace, drops control characters (log/claim-injection guard),
+// and caps the length. Returns "" for empty/garbage so IssueAgentToken can omit
+// the claim entirely. The value is untrusted (self-asserted by the device), so it
+// is only ever used for attribution/display, never for authorization.
+func sanitizeLoginUser(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f { // strip control chars incl. CR/LF/TAB
+			return -1
+		}
+		return r
+	}, raw)
+	cleaned = strings.TrimSpace(cleaned)
+	if len(cleaned) > 256 {
+		cleaned = cleaned[:256]
+	}
+	return cleaned
 }
 
 // IssuePortalToken generates a short-lived token for a SCIM-provisioned client

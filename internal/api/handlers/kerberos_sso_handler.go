@@ -160,7 +160,8 @@ func (h *KerberosSSOHandler) Authenticate(c *gin.Context) {
 	}
 	jwt, expiresAt, err := h.auth.IssueAgentToken(req.TenantID, reg.ID, identity.FingerprintSHA256, identity.Serial, groups,
 		db.AgentTokenDomain{DomainJoined: true, UPN: kid.Principal},
-		db.AgentTokenPosture{Compliant: compliant, Status: complianceStatus})
+		db.AgentTokenPosture{Compliant: compliant, Status: complianceStatus},
+		kid.Principal) // Kerberos-verified user → also attribute gateway traffic (user_id)
 	if err != nil {
 		h.logger.Error("kerberos sso: token issuance failed", zap.String("device_id", req.DeviceID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})

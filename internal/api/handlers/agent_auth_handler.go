@@ -32,6 +32,11 @@ type agentAuthRequest struct {
 	DeviceID string `json:"device_id"`
 	Platform string `json:"platform"`
 	ClientID string `json:"client_id"`
+	// LoginUser is the interactive console user the agent reports (device-reported,
+	// NOT IdP-verified). Stamped into the token's user_id claim so gateway traffic
+	// is attributed to the human at the keyboard. The Kerberos-verified upn claim
+	// stays reserved for the SSO flow.
+	LoginUser string `json:"login_user"`
 }
 
 type mtlsClientIdentity struct {
@@ -120,6 +125,7 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		groups,
 		db.AgentTokenDomain{},
 		db.AgentTokenPosture{Compliant: compliant, Status: complianceStatus},
+		req.LoginUser,
 	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))
