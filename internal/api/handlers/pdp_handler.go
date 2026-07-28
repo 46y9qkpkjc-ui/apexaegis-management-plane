@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -49,4 +50,81 @@ func (h *PDPHandler) DomainEvent(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, v)
+}
+
+// resolveRequest is the endpoint DNS PEP's per-miss query: {domain, tenant, device}.
+type resolveRequest struct {
+	Domain string `json:"domain"`
+	Tenant string `json:"tenant"`
+	Device string `json:"device"`
+}
+
+// resolveResponse is the {decision, score, ttl, pending} contract the on-box
+// resolver caches on. ttl is RELATIVE seconds (PEP re-queries after it lapses).
+type resolveResponse struct {
+	Domain   string `json:"domain"`
+	Decision string `json:"decision"` // allow | monitor | deny
+	Score    int    `json:"score"`
+	TTL      int    `json:"ttl"`     // seconds until re-query
+	Pending  bool   `json:"pending"` // true = provisional; real verdict lands async
+}
+
+// pdpFailOpen is the never-fail-dead answer: allow, short TTL, pending — so the
+// on-box resolver keeps resolving and re-queries soon, no matter what the brain is
+// doing. DNS must never die the way the 100.64.0.1 remote resolver did.
+func pdpFailOpen(domain string) resolveResponse {
+	return resolveResponse{Domain: domain, Decision: string(risk.DecisionAllow), Score: 0, TTL: 30, Pending: true}
+}
+
+// Resolve handles POST /api/v1/pdp/resolve — the endpoint DNS PEP's pull-on-miss
+// query (device-mTLS authenticated). Cache hit → the cached verdict; miss → the
+// PDP kicks async scoring and returns a provisional verdict. It ALWAYS fail-opens:
+// bad input, no tenant, or an adjudication error returns allow+pending (HTTP 200)
+// rather than an error, so the on-box resolver can never be stranded on a hot-path
+// DNS answer.
+func (h *PDPHandler) Resolve(c *gin.Context) {
+	var req resolveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, pdpFailOpen(""))
+		return
+	}
+	domain := strings.TrimSpace(req.Domain)
+	if domain == "" {
+		c.JSON(http.StatusOK, pdpFailOpen(""))
+		return
+	}
+	// Tenant is authoritative from the device cert (DeviceMTLSAuth sets org_id);
+	// the body's tenant is only a fallback.
+	orgID := c.GetString("org_id")
+	if orgID == "" {
+		orgID = strings.TrimSpace(req.Tenant)
+	}
+	if orgID == "" {
+		c.JSON(http.StatusOK, pdpFailOpen(domain)) // unscoped → fail-open, never 4xx on the DNS path
+		return
+	}
+	device := strings.TrimSpace(req.Device)
+	if device == "" {
+		device = c.GetString("device_id")
+	}
+	ev := risk.DomainEvent{Domain: domain, ClientID: device, Layer: "dns", SeenAt: time.Now()}
+
+	v, err := h.svc.Adjudicate(c.Request.Context(), orgID, ev)
+	if err != nil {
+		h.logger.Warn("pdp resolve: adjudication failed — fail-open",
+			zap.String("domain", domain), zap.String("org_id", orgID), zap.Error(err))
+		c.JSON(http.StatusOK, pdpFailOpen(domain))
+		return
+	}
+	ttl := int(time.Until(v.ExpiresAt).Seconds())
+	if ttl < 1 {
+		ttl = 1
+	}
+	c.JSON(http.StatusOK, resolveResponse{
+		Domain:   domain,
+		Decision: string(v.Decision),
+		Score:    v.RiskScore,
+		TTL:      ttl,
+		Pending:  v.Source == risk.SourcePending,
+	})
 }

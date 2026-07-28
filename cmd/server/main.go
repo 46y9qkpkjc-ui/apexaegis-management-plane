@@ -846,12 +846,16 @@ func main() {
 		logger.Info("risk agent enabled (Claude domain scorer)")
 	}
 
+	pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, riskScorer, logger), logger)
+	// Gateway SWG PEP → domain events (gateway-key auth, tenant header).
 	pdpAPI := router.Group("/api/v1/pdp")
 	pdpAPI.Use(middleware.GatewayAuth(gwRegistry))
-	{
-		pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, riskScorer, logger), logger)
-		pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
-	}
+	pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
+	// Endpoint DNS PEP → pull-on-miss resolve (device-mTLS; the on-box resolver
+	// calls this per cache miss). Same PDP service, tenant from the device cert.
+	pdpDeviceAPI := router.Group("/api/v1/pdp")
+	pdpDeviceAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
+	pdpDeviceAPI.POST("/resolve", pdpHandler.Resolve)
 
 	// Internal ITSM — native service/change requests (a 3rd routing target
 	// beside JIRA/ServiceNow), operator+tenant scoped. Console-facing (JWT).
