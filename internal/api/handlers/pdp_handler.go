@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -15,11 +17,12 @@ import (
 // new public-domain event and gets back an enforcement Verdict.
 type PDPHandler struct {
 	svc    *risk.Service
+	hub    *risk.VerdictHub
 	logger *zap.Logger
 }
 
-func NewPDPHandler(svc *risk.Service, logger *zap.Logger) *PDPHandler {
-	return &PDPHandler{svc: svc, logger: logger}
+func NewPDPHandler(svc *risk.Service, hub *risk.VerdictHub, logger *zap.Logger) *PDPHandler {
+	return &PDPHandler{svc: svc, hub: hub, logger: logger}
 }
 
 // DomainEvent handles POST /api/v1/pdp/domain-event. The tenant is taken from the
@@ -127,4 +130,61 @@ func (h *PDPHandler) Resolve(c *gin.Context) {
 		TTL:      ttl,
 		Pending:  v.Source == risk.SourcePending,
 	})
+}
+
+// Verdicts handles GET /api/v1/pdp/verdicts/stream — a Server-Sent Events stream
+// of VerdictUpdates so a subscribed PEP flips pending→real (and blocks on a deny)
+// the instant the async scorer resolves, instead of waiting for its local TTL to
+// lapse. The gateway subscribes to all tenants; a device-mTLS endpoint is scoped to
+// its own org (X-ApexAegis-Tenant-ID / DeviceMTLSAuth). Fail-safe: a dropped/late
+// event is only a latency hit — the PEP re-syncs from cache on its next miss.
+func (h *PDPHandler) Verdicts(c *gin.Context) {
+	if h.hub == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "verdict stream unavailable"})
+		return
+	}
+	orgID := strings.TrimSpace(c.GetHeader("X-ApexAegis-Tenant-ID"))
+	if orgID == "" {
+		orgID = strings.TrimSpace(c.GetHeader("X-Tenant-ID"))
+	}
+	if orgID == "" {
+		orgID = c.GetString("org_id") // device-mTLS sets this; scope the endpoint to its tenant
+	}
+
+	ch, unsubscribe := h.hub.Subscribe(orgID)
+	defer unsubscribe()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no") // don't let a proxy buffer the stream
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Flush()
+
+	ping := time.NewTicker(20 * time.Second) // keep idle LBs/proxies from dropping the stream
+	defer ping.Stop()
+	ctx := c.Request.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ping.C:
+			if _, err := c.Writer.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			c.Writer.Flush()
+		case u, ok := <-ch:
+			if !ok {
+				return
+			}
+			b, err := json.Marshal(u)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(c.Writer, "event: verdict\ndata: %s\n\n", b); err != nil {
+				return
+			}
+			c.Writer.Flush()
+		}
+	}
 }

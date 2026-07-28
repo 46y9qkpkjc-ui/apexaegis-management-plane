@@ -42,7 +42,7 @@ func (f *fakeVerdictStore) LogDecision(context.Context, string, risk.DomainEvent
 func resolveWith(t *testing.T, store *fakeVerdictStore, body, orgID string) resolveResponse {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	h := NewPDPHandler(risk.NewService(store, nil, zap.NewNop()), zap.NewNop())
+	h := NewPDPHandler(risk.NewService(store, nil, zap.NewNop()), nil, zap.NewNop())
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/pdp/resolve", strings.NewReader(body))

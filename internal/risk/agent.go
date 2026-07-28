@@ -53,6 +53,7 @@ type Agent struct {
 	model  anthropic.Model
 	tools  []tools.Tool
 	store  *Store
+	hub    *VerdictHub // fan-out to subscribed PEPs on resolve (nil-safe)
 	logger *zap.Logger
 }
 
@@ -60,7 +61,7 @@ type Agent struct {
 // whois_lookup + nrd_check (RDAP via rdap.org), and geo_lookup (ip-api.com free
 // endpoint). The remaining credentialed tools — domain_reputation (threat-intel
 // feed) and nod_check (passive-DNS) — register here once their keys land.
-func NewAgent(apiKey string, store *Store, logger *zap.Logger) *Agent {
+func NewAgent(apiKey string, store *Store, hub *VerdictHub, logger *zap.Logger) *Agent {
 	return &Agent{
 		client: anthropic.NewClient(option.WithAPIKey(apiKey)),
 		model:  anthropic.ModelClaudeOpus4_8,
@@ -71,6 +72,7 @@ func NewAgent(apiKey string, store *Store, logger *zap.Logger) *Agent {
 			tools.NewGeoTool(),
 		},
 		store:  store,
+		hub:    hub,
 		logger: logger,
 	}
 }
@@ -181,6 +183,13 @@ func (a *Agent) score(orgID, key string, scope KeyScope, ev DomainEvent) {
 	resolved := Verdict{Domain: ev.Domain, Key: key, KeyScope: scope,
 		Decision: verdict.Decision, RiskScore: verdict.RiskScore, Source: SourceAI, Rationale: verdict.Rationale}
 	_ = a.store.LogDecision(ctx, orgID, ev, resolved, verdict.Category)
+	// Push the resolved verdict to subscribed PEPs so they flip pending→real (and
+	// block instantly on a deny) without waiting for their local TTL to lapse.
+	a.hub.Publish(orgID, VerdictUpdate{
+		Key: key, KeyScope: scope, Decision: verdict.Decision, RiskScore: verdict.RiskScore,
+		Rationale: verdict.Rationale, ExpiresAt: expiresAt,
+		Reason: ReasonAIResolved, CorrelationID: ev.ClientID + "|" + key,
+	})
 	a.logger.Info("risk agent verdict",
 		zap.String("domain", key), zap.String("decision", string(verdict.Decision)), zap.Int("score", verdict.RiskScore))
 }

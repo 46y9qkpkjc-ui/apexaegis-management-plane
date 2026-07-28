@@ -841,21 +841,24 @@ func main() {
 	// The Claude risk scorer (P2) runs on a cache MISS, async off the packet path.
 	// nil (no ANTHROPIC_API_KEY) → MISS returns a provisional monitor/pending only.
 	var riskScorer risk.Scorer
+	verdictHub := risk.NewVerdictHub() // fan-out resolved verdicts to subscribed PEPs (SSE)
 	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
-		riskScorer = risk.NewAgent(k, riskStore, logger)
+		riskScorer = risk.NewAgent(k, riskStore, verdictHub, logger)
 		logger.Info("risk agent enabled (Claude domain scorer)")
 	}
 
-	pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, riskScorer, logger), logger)
+	pdpHandler := handlers.NewPDPHandler(risk.NewService(riskStore, riskScorer, logger), verdictHub, logger)
 	// Gateway SWG PEP → domain events (gateway-key auth, tenant header).
 	pdpAPI := router.Group("/api/v1/pdp")
 	pdpAPI.Use(middleware.GatewayAuth(gwRegistry))
 	pdpAPI.POST("/domain-event", pdpHandler.DomainEvent)
+	pdpAPI.GET("/verdicts/stream", pdpHandler.Verdicts) // SSE: instant verdict push to the gateway PEP
 	// Endpoint DNS PEP → pull-on-miss resolve (device-mTLS; the on-box resolver
 	// calls this per cache miss). Same PDP service, tenant from the device cert.
 	pdpDeviceAPI := router.Group("/api/v1/pdp")
 	pdpDeviceAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	pdpDeviceAPI.POST("/resolve", pdpHandler.Resolve)
+	pdpDeviceAPI.GET("/verdicts/stream", pdpHandler.Verdicts) // SSE: endpoint DNS PEP subscription
 
 	// Internal ITSM — native service/change requests (a 3rd routing target
 	// beside JIRA/ServiceNow), operator+tenant scoped. Console-facing (JWT).
