@@ -115,6 +115,7 @@ const (
 // CoA/Disconnect kill switch tears it down; this stream updates the local cache
 // for future flows.
 type VerdictUpdate struct {
+	OrgID         string       `json:"org_id"` // the verdict's tenant (an all-tenants subscriber keys on this)
 	Key           string       `json:"key"`
 	KeyScope      KeyScope     `json:"key_scope"`
 	Decision      Decision     `json:"decision"`

@@ -186,7 +186,7 @@ func (a *Agent) score(orgID, key string, scope KeyScope, ev DomainEvent) {
 	// Push the resolved verdict to subscribed PEPs so they flip pending→real (and
 	// block instantly on a deny) without waiting for their local TTL to lapse.
 	a.hub.Publish(orgID, VerdictUpdate{
-		Key: key, KeyScope: scope, Decision: verdict.Decision, RiskScore: verdict.RiskScore,
+		OrgID: orgID, Key: key, KeyScope: scope, Decision: verdict.Decision, RiskScore: verdict.RiskScore,
 		Rationale: verdict.Rationale, ExpiresAt: expiresAt,
 		Reason: ReasonAIResolved, CorrelationID: ev.ClientID + "|" + key,
 	})
