@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/zcp/management-plane/internal/api/middleware"
+	"github.com/zcp/management-plane/internal/audit"
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/enforcement"
 	"go.uber.org/zap"
@@ -35,15 +36,18 @@ type ClientRuntimeHandler struct {
 	// enforcement responds to a posture DROP (compliant→non-compliant) by driving
 	// a CoA/Disconnect at the NAS — continuous enforcement. nil-safe (off by default).
 	enforcement *enforcement.Controller
+	// auditLog emits posture events into the org-scoped MP event feed. nil-safe.
+	auditLog *audit.AuditLog
 }
 
-func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, enforcer *enforcement.Controller, logger *zap.Logger) *ClientRuntimeHandler {
+func NewClientRuntimeHandler(clientConfigStore *db.ClientConfigStore, deviceStore *db.DeviceStore, enforcer *enforcement.Controller, auditLog *audit.AuditLog, logger *zap.Logger) *ClientRuntimeHandler {
 	return &ClientRuntimeHandler{
 		clientConfigStore:  clientConfigStore,
 		deviceStore:        deviceStore,
 		logger:             logger,
 		requireAttestation: os.Getenv("POSTURE_REQUIRE_ATTESTATION") == "true",
 		enforcement:        enforcer,
+		auditLog:           auditLog,
 	}
 }
 
@@ -362,6 +366,42 @@ func (h *ClientRuntimeHandler) ReportPosture(c *gin.Context) {
 		return
 	}
 
+	// Emit a posture audit event so compliance state lands in the org-scoped MP event
+	// feed (visible in the console alongside auth/policy/dot1x events). Uses the
+	// authoritative FIM-adjusted verdict, not the raw device claim. Non-compliant is a
+	// warning; a mid-session compliant→non-compliant DROP is critical (only detectable
+	// when enforcement is enabled, which is what fetches prevCompliant above).
+	if h.auditLog != nil {
+		sev, action := audit.SevInfo, "compliant"
+		if !effectiveCompliant {
+			sev, action = audit.SevWarning, "non_compliant"
+			if prevCompliant {
+				sev, action = audit.SevCritical, "compliance_drop"
+			}
+		}
+		det, _ := json.Marshal(map[string]interface{}{
+			"device_cn":      c.GetString("device_cn"),
+			"score":          request.Score,
+			"disk_encrypted": request.DiskEncrypted,
+			"firewall":       request.FirewallEnabled,
+			"antivirus":      request.AntivirusName,
+			"os_version":     request.OSVersion,
+			"attested":       attested,
+		})
+		h.auditLog.Record(audit.AuditEntry{
+			EventType: audit.EventPosture,
+			Severity:  sev,
+			Actor:     "device:" + deviceID,
+			ActorIP:   c.ClientIP(),
+			Resource:  "device:" + deviceID,
+			Action:    action,
+			OrgID:     orgID,
+			RequestID: c.GetString("request_id"),
+			Details:   det,
+			Success:   effectiveCompliant,
+		})
+	}
+
 	// Continuous enforcement: a mid-session posture DROP drives a CoA/Disconnect at
 	// the NAS. Async — the CoA has its own timeout and must not block the report ACK
 	// (and the request context ends when we return). No live NAS session = no-op.
@@ -417,6 +457,60 @@ func (h *ClientRuntimeHandler) ReportLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "count": len(logs)})
+}
+
+type networkTelemetryRequest struct {
+	ReportedAt    time.Time `json:"reported_at"`
+	LoginUser     string    `json:"login_user"`
+	Interface     string    `json:"iface"`
+	Kind          string    `json:"kind"`
+	SSID          string    `json:"ssid"`
+	SignalPct     int       `json:"signal_pct"`
+	RSSIdBm       int       `json:"rssi_dbm"`
+	LinkMbps      int       `json:"link_mbps"`
+	SourceIP      string    `json:"source_ip"`
+	GatewayIP     string    `json:"gateway_ip"`
+	Dot1XState    string    `json:"dot1x_state"`
+	LatencyMs     int       `json:"latency_ms"`
+	LossPct       int       `json:"loss_pct"`
+	BandwidthMbps int       `json:"bandwidth_mbps"`
+	LastMileScore int       `json:"last_mile_score"`
+	// Per-PEP tunnel status. swg_connected = SWG PEP (stream-proxy web backhaul)
+	// is up; dc_tunnel_connected = AD/DC PEP pre-logon machine tunnel is up;
+	// ot_mode = VDI/DC-adjacent posture (no machine tunnel by design, DC native).
+	SwgConnected      bool            `json:"swg_connected"`
+	DcTunnelConnected bool            `json:"dc_tunnel_connected"`
+	OTMode            bool            `json:"ot_mode"`
+	Raw               json.RawMessage `json:"raw"`
+}
+
+// ReportNetwork ingests a per-device network-telemetry sample (device-mTLS auth,
+// org/device resolved from the cert). Stored org-scoped in device_network_telemetry
+// and surfaced on the Network Events page.
+func (h *ClientRuntimeHandler) ReportNetwork(c *gin.Context) {
+	orgID, deviceID := c.GetString("org_id"), c.GetString("device_id")
+	if orgID == "" || deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
+		return
+	}
+	var req networkTelemetryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid network telemetry"})
+		return
+	}
+	if err := h.deviceStore.SaveNetworkTelemetry(c.Request.Context(), orgID, deviceID, db.DeviceNetworkTelemetry{
+		ReportedAt: req.ReportedAt, LoginUser: req.LoginUser, Interface: req.Interface, Kind: req.Kind,
+		SSID: req.SSID, SignalPct: req.SignalPct, RSSIdBm: req.RSSIdBm, LinkMbps: req.LinkMbps,
+		SourceIP: req.SourceIP, GatewayIP: req.GatewayIP, Dot1XState: req.Dot1XState,
+		LatencyMs: req.LatencyMs, LossPct: req.LossPct, BandwidthMbps: req.BandwidthMbps,
+		LastMileScore: req.LastMileScore, SwgConnected: req.SwgConnected,
+		DcTunnelConnected: req.DcTunnelConnected, OTMode: req.OTMode, Raw: req.Raw,
+	}); err != nil {
+		h.logger.Error("failed to save network telemetry", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save network telemetry"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 
 func defaultRuntimeClientProfile() runtimeClientProfile {

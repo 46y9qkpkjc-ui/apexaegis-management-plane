@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/zap"
 )
@@ -187,6 +188,13 @@ type DeviceRow struct {
 	LastSeen    string `json:"last_seen"`
 	TenantName  string `json:"tenant_name"`
 	TenantID    string `json:"tenant_id"`
+	User        string `json:"user"` // linked client user (name), '' if unassigned
+	// Per-PEP tunnel status (agent network report → device record). SwgConnected =
+	// SWG PEP up; DcTunnelConnected = AD/DC PEP machine tunnel up; OTMode =
+	// VDI/DC-adjacent (DC native, no machine tunnel by design).
+	SwgConnected      bool `json:"swg_connected"`
+	DcTunnelConnected bool `json:"dc_tunnel_connected"`
+	OTMode            bool `json:"ot_mode"`
 }
 
 // ListDevices returns devices for one tenant, or — when tenantID is empty — every
@@ -194,9 +202,11 @@ type DeviceRow struct {
 func (s *TenantStore) ListDevices(ctx context.Context, tenantID string, scope TenantScope) ([]DeviceRow, error) {
 	q := `SELECT COALESCE(d.device_id,''), COALESCE(d.device_name,''), COALESCE(d.os_type,''),
 	             COALESCE(d.os_version,''), COALESCE(d.compliance_status,'unknown'), d.managed_type,
-	             COALESCE(d.last_seen::text,''), o.name, o.id::text
+	             COALESCE(d.last_seen::text,''), o.name, o.id::text, COALESCE(cu.name,''),
+	             COALESCE(d.swg_connected,false), COALESCE(d.dc_tunnel_connected,false), COALESCE(d.ot_mode,false)
 	      FROM system_mgmt.devices d
-	      JOIN system_mgmt.organizations o ON o.id = d.org_id`
+	      JOIN system_mgmt.organizations o ON o.id = d.org_id
+	      LEFT JOIN system_mgmt.client_users cu ON cu.id = d.client_user_id`
 	args := []interface{}{}
 	if tenantID != "" {
 		args = append(args, tenantID)
@@ -218,10 +228,81 @@ func (s *TenantStore) ListDevices(ctx context.Context, tenantID string, scope Te
 	for rows.Next() {
 		var d DeviceRow
 		if err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OSType, &d.OSVersion, &d.Compliance,
-			&d.ManagedType, &d.LastSeen, &d.TenantName, &d.TenantID); err != nil {
+			&d.ManagedType, &d.LastSeen, &d.TenantName, &d.TenantID, &d.User,
+			&d.SwgConnected, &d.DcTunnelConnected, &d.OTMode); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// NetworkEventRow is one network-telemetry sample joined to its device + tenant, for
+// the console's Network Events page.
+type NetworkEventRow struct {
+	DeviceID      string `json:"device_id"`
+	DeviceName    string `json:"device_name"`
+	TenantID      string `json:"tenant_id"`
+	TenantName    string `json:"tenant_name"`
+	Operator      string `json:"operator"`
+	ReportedAt    string `json:"reported_at"`
+	LoginUser     string `json:"login_user"`
+	Interface     string `json:"iface"`
+	Kind          string `json:"kind"`
+	SSID          string `json:"ssid"`
+	SignalPct     int    `json:"signal_pct"`
+	RSSIdBm       int    `json:"rssi_dbm"`
+	LinkMbps      int    `json:"link_mbps"`
+	SourceIP      string `json:"source_ip"`
+	GatewayIP     string `json:"gateway_ip"`
+	Dot1XState    string `json:"dot1x_state"`
+	LatencyMs     int    `json:"latency_ms"`
+	LossPct       int    `json:"loss_pct"`
+	BandwidthMbps int    `json:"bandwidth_mbps"`
+	LastMileScore int    `json:"last_mile_score"`
+}
+
+// ListNetworkTelemetry returns the network-telemetry log (newest first) within the
+// caller's scope (operator fleet / own org / all) — one row per polled sample, per
+// device/user. Backs the console's Network Events feed.
+func (s *TenantStore) ListNetworkTelemetry(ctx context.Context, scope TenantScope, limit int) ([]NetworkEventRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	q := `SELECT nt.device_id::text, COALESCE(d.device_name,''), nt.org_id::text, o.name,
+	             COALESCE(o.operator,'ApexAegis (direct)'), nt.reported_at::text, nt.login_user,
+	             nt.iface, nt.kind, nt.ssid, nt.signal_pct, nt.rssi_dbm, nt.link_mbps,
+	             nt.source_ip, nt.gateway_ip, nt.dot1x_state, nt.latency_ms, nt.loss_pct,
+	             nt.bandwidth_mbps, nt.last_mile_score
+	      FROM system_mgmt.device_network_telemetry nt
+	      JOIN system_mgmt.devices d ON d.id = nt.device_id
+	      JOIN system_mgmt.organizations o ON o.id = nt.org_id
+	      WHERE 1=1`
+	args := []interface{}{}
+	if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += fmt.Sprintf(" AND COALESCE(o.operator,'ApexAegis (direct)') = $%d", len(args))
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += fmt.Sprintf(" AND nt.org_id = $%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY nt.reported_at DESC LIMIT $%d", len(args))
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []NetworkEventRow{}
+	for rows.Next() {
+		var r NetworkEventRow
+		if err := rows.Scan(&r.DeviceID, &r.DeviceName, &r.TenantID, &r.TenantName, &r.Operator,
+			&r.ReportedAt, &r.LoginUser, &r.Interface, &r.Kind, &r.SSID, &r.SignalPct, &r.RSSIdBm,
+			&r.LinkMbps, &r.SourceIP, &r.GatewayIP, &r.Dot1XState, &r.LatencyMs, &r.LossPct,
+			&r.BandwidthMbps, &r.LastMileScore); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -472,7 +553,7 @@ func (s *TenantStore) GetTenantDetail(ctx context.Context, tenantID string) (*Te
 	polRows, err := s.db.DB.QueryContext(ctx, `
 		SELECT id, name, action, sequence, enabled
 		FROM system_mgmt.policies WHERE org_id = $1::text
-		ORDER BY sequence LIMIT 50`, tenantID)
+		ORDER BY is_default, sequence LIMIT 50`, tenantID)
 	if err != nil {
 		return nil, err
 	}

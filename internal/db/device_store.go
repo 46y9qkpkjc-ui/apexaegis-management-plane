@@ -278,6 +278,66 @@ func (s *DeviceStore) SaveClientLogs(ctx context.Context, orgID, deviceID string
 	return nil
 }
 
+// DeviceNetworkTelemetry is one network-posture sample the agent polls and reports:
+// interface + wifi signal + dot1x state + last-mile quality. Feeds the Network Events
+// console page.
+type DeviceNetworkTelemetry struct {
+	ReportedAt    time.Time `json:"reported_at"`
+	LoginUser     string    `json:"login_user"`
+	Interface     string    `json:"iface"`
+	Kind          string    `json:"kind"`
+	SSID          string    `json:"ssid"`
+	SignalPct     int       `json:"signal_pct"`
+	RSSIdBm       int       `json:"rssi_dbm"`
+	LinkMbps      int       `json:"link_mbps"`
+	SourceIP      string    `json:"source_ip"`
+	GatewayIP     string    `json:"gateway_ip"`
+	Dot1XState    string    `json:"dot1x_state"`
+	LatencyMs     int       `json:"latency_ms"`
+	LossPct       int       `json:"loss_pct"`
+	BandwidthMbps int       `json:"bandwidth_mbps"`
+	LastMileScore int       `json:"last_mile_score"`
+	// Per-PEP tunnel status, persisted onto the device record (not the telemetry
+	// log). swg_connected = SWG PEP up; dc_tunnel_connected = AD/DC PEP machine
+	// tunnel up; ot_mode = VDI/DC-adjacent (DC native, no machine tunnel by design).
+	SwgConnected      bool            `json:"swg_connected"`
+	DcTunnelConnected bool            `json:"dc_tunnel_connected"`
+	OTMode            bool            `json:"ot_mode"`
+	Raw               json.RawMessage `json:"raw"`
+}
+
+func (s *DeviceStore) SaveNetworkTelemetry(ctx context.Context, orgID, deviceID string, t DeviceNetworkTelemetry) error {
+	if t.ReportedAt.IsZero() {
+		t.ReportedAt = time.Now().UTC()
+	}
+	if len(t.Raw) == 0 {
+		t.Raw = json.RawMessage(`{}`)
+	}
+	if t.LastMileScore < 0 {
+		t.LastMileScore = 0
+	}
+	if t.LastMileScore > 100 {
+		t.LastMileScore = 100
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_mgmt.device_network_telemetry
+		(org_id, device_id, reported_at, login_user, iface, kind, ssid, signal_pct, rssi_dbm,
+		 link_mbps, source_ip, gateway_ip, dot1x_state, latency_ms, loss_pct, bandwidth_mbps,
+		 last_mile_score, raw)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+	`, orgID, deviceID, t.ReportedAt, t.LoginUser, t.Interface, t.Kind, t.SSID, t.SignalPct, t.RSSIdBm,
+		t.LinkMbps, t.SourceIP, t.GatewayIP, t.Dot1XState, t.LatencyMs, t.LossPct, t.BandwidthMbps,
+		t.LastMileScore, t.Raw)
+	if err != nil {
+		return fmt.Errorf("save network telemetry: %w", err)
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.devices
+		SET last_seen=now(), updated_at=now(),
+		    swg_connected=$3, dc_tunnel_connected=$4, ot_mode=$5
+		WHERE org_id=$1 AND id=$2`, orgID, deviceID, t.SwgConnected, t.DcTunnelConnected, t.OTMode)
+	return nil
+}
+
 // GetIntegrityBaseline returns the device's accepted FIM baseline (path → hash), and
 // whether one has been established yet.
 func (s *DeviceStore) GetIntegrityBaseline(ctx context.Context, orgID, deviceID string) (map[string]string, bool, error) {

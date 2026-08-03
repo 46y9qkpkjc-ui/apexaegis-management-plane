@@ -69,6 +69,10 @@ func (h *AdminHandler) CreatePolicy(c *gin.Context) {
 		rand.Read(b)
 		p.ID = "pol-" + hex.EncodeToString(b)
 	}
+	// Stamp the caller's org so the row isn't stored under org_id='' — the org-scoped
+	// ListPolicies would filter that right back out (the "new policy vanishes on
+	// refresh" bug). Same tenant context the list reads from the JWT.
+	p.OrgID = c.GetString("org_id")
 
 	author := c.GetString("user_id")
 	version, lockMsg := h.policyStore.Create(&p, author)
@@ -91,6 +95,7 @@ func (h *AdminHandler) UpdatePolicy(c *gin.Context) {
 	}
 
 	p.ID = c.Param("id")
+	p.OrgID = c.GetString("org_id") // keep the row in the caller's org (same as Create)
 	author := c.GetString("user_id")
 
 	version, ok, lockMsg := h.policyStore.Update(&p, author)

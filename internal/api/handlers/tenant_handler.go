@@ -39,6 +39,20 @@ func callerScope(c *gin.Context) db.TenantScope {
 	return db.TenantScope{OrgID: strings.TrimSpace(c.GetString("user_org_id"))}
 }
 
+// activeScope narrows to the tenant currently selected in the console's switcher
+// (X-Scope-Tenant-ID, already authorized against the caller's breadth by JWTAuth,
+// which sets "scoped_tenant"). So a super_admin or MSP operator viewing Aspire sees
+// ONLY Aspire's data. With no selection ("All Tenants") it falls back to the caller's
+// full breadth. Use this for tenant-scoped DATA reads (devices, risk, ITSM, ghosted
+// apps); keep callerScope for the switcher's own tenant/operator lists and for the
+// Allows() authorization checks (which must test the caller's breadth, not the view).
+func activeScope(c *gin.Context) db.TenantScope {
+	if scoped := strings.TrimSpace(c.GetString("scoped_tenant")); scoped != "" {
+		return db.TenantScope{OrgID: scoped}
+	}
+	return callerScope(c)
+}
+
 // ListTenants returns headline activity for every tenant (consolidated overview).
 func (h *TenantHandler) ListTenants(c *gin.Context) {
 	tenants, err := h.store.ListTenantSummaries(c.Request.Context(), callerScope(c))
@@ -167,7 +181,10 @@ func (h *TenantHandler) UpdatePostureProfile(c *gin.Context) {
 
 // ListDevices returns devices across all tenants for the enrolment inventory.
 func (h *TenantHandler) ListDevices(c *gin.Context) {
-	rows, err := h.store.ListDevices(c.Request.Context(), c.Query("tenant_id"), callerScope(c))
+	// tenant_id query param intentionally dropped: it was applied without an Allows()
+	// check (an IDOR — any caller could pass another tenant's id). Scope now comes only
+	// from activeScope (the authorized switcher selection or the caller's breadth).
+	rows, err := h.store.ListDevices(c.Request.Context(), "", activeScope(c))
 	if err != nil {
 		h.logger.Error("device inventory", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load devices"})
@@ -176,9 +193,21 @@ func (h *TenantHandler) ListDevices(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"devices": rows})
 }
 
+// NetworkEvents returns the tenant-scoped network-telemetry log for the Network Events
+// console page — per-device/user samples (wifi signal, dot1x, bandwidth, last-mile).
+func (h *TenantHandler) NetworkEvents(c *gin.Context) {
+	rows, err := h.store.ListNetworkTelemetry(c.Request.Context(), activeScope(c), 200)
+	if err != nil {
+		h.logger.Error("network events", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load network events"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"events": rows})
+}
+
 // ListGhosted returns ghosted apps across all tenants (consolidated overview).
 func (h *TenantHandler) ListGhosted(c *gin.Context) {
-	rows, err := h.store.ListGhostedApps(c.Request.Context(), "", callerScope(c))
+	rows, err := h.store.ListGhostedApps(c.Request.Context(), "", activeScope(c))
 	if err != nil {
 		h.logger.Error("ghosted apps", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load ghosted apps"})

@@ -22,6 +22,11 @@ type SecurityPolicy struct {
 	Name     string `json:"name"`
 	Sequence int    `json:"sequence"`
 	Enabled  bool   `json:"enabled"`
+	// IsDefault marks a catch-all (default-deny) policy that is ALWAYS evaluated
+	// LAST, regardless of Sequence. Every policy read orders by (is_default,
+	// sequence) so an is_default=true row sorts after all others and can never
+	// be superseded by a later-created policy.
+	IsDefault bool `json:"is_default"`
 
 	TrafficSteering    []string        `json:"traffic_steering"`
 	AccessMethods      []string        `json:"access_methods"`

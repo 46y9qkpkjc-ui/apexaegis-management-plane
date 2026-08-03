@@ -168,6 +168,136 @@ func (s *Store) ListDecisions(ctx context.Context, operator, orgID string, limit
 	return out, rows.Err()
 }
 
+// ListDecisionsForDomain returns the per-hit decision log for ONE domain within the
+// caller's scope — the expand/detail view under a consolidated row. Same shape and
+// scope semantics as ListDecisions, filtered to rd.domain.
+func (s *Store) ListDecisionsForDomain(ctx context.Context, operator, orgID, domain string, limit int) ([]DecisionRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	q := `SELECT ` + decisionCols + `
+	      ` + decisionFrom + `
+	      WHERE rd.domain = $1`
+	args := []interface{}{domain}
+	if operator != "" {
+		args = append(args, operator)
+		q += fmt.Sprintf(" AND COALESCE(o.operator,'ApexAegis (direct)') = $%d", len(args))
+	} else if orgID != "" {
+		args = append(args, orgID)
+		q += fmt.Sprintf(" AND rd.org_id = $%d", len(args))
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY rd.created_at DESC LIMIT $%d", len(args))
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DecisionRow{}
+	for rows.Next() {
+		d, err := scanDecision(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ConsolidatedRow is one domain's risk activity within a tenant — the consolidated
+// console view. hit_count / distinct_users / first_seen aggregate ALL decisions for
+// the (tenant, domain); decision / risk_score / source / category and the rich verdict
+// fields reflect the LATEST decision. Expand to the per-hit rows via ListDecisionsForDomain.
+type ConsolidatedRow struct {
+	TenantID      string          `json:"tenant_id"`
+	TenantName    string          `json:"tenant_name"`
+	Operator      string          `json:"operator"`
+	Domain        string          `json:"domain"`
+	Decision      string          `json:"decision"`
+	RiskScore     int             `json:"risk_score"`
+	Source        string          `json:"source"`
+	Category      string          `json:"category"`
+	HitCount      int             `json:"hit_count"`
+	DistinctUsers int             `json:"distinct_users"`
+	FirstSeen     string          `json:"first_seen"`
+	LastSeen      string          `json:"last_seen"`
+	Confidence    string          `json:"confidence"`
+	TopFactors    []string        `json:"top_factors"`
+	Signals       json.RawMessage `json:"signals"`
+	ToolsRan      []string        `json:"tools_ran"`
+}
+
+// ListConsolidated returns one row per (tenant, domain) — the consolidated risk log.
+// Aggregates (count, distinct users, first-seen) span all decisions for the domain;
+// the displayed decision/score/verdict is the most recent. Newest activity first.
+// Scope: operator fleet / own org / all, same as ListDecisions.
+func (s *Store) ListConsolidated(ctx context.Context, operator, orgID string, limit int) ([]ConsolidatedRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	scopeClause := ""
+	args := []interface{}{}
+	if operator != "" {
+		args = append(args, operator)
+		scopeClause = fmt.Sprintf(" AND COALESCE(o.operator,'ApexAegis (direct)') = $%d", len(args))
+	} else if orgID != "" {
+		args = append(args, orgID)
+		scopeClause = fmt.Sprintf(" AND rd.org_id = $%d", len(args))
+	}
+	args = append(args, limit)
+	q := `
+WITH scoped AS (
+  SELECT rd.id, rd.org_id, rd.domain, rd.cache_key, rd.decision, rd.risk_score,
+         rd.source, rd.category, rd.actor_user, rd.created_at,
+         o.name AS tenant_name, COALESCE(o.operator,'ApexAegis (direct)') AS operator
+  FROM system_mgmt.risk_decisions rd
+  JOIN system_mgmt.organizations o ON o.id = rd.org_id
+  WHERE 1=1` + scopeClause + `
+),
+agg AS (
+  SELECT org_id, domain, count(*) AS hit_count,
+         count(DISTINCT actor_user) AS distinct_users,
+         min(created_at) AS first_seen, max(created_at) AS last_seen
+  FROM scoped GROUP BY org_id, domain
+),
+latest AS (
+  SELECT DISTINCT ON (org_id, domain)
+         org_id, domain, cache_key, decision, risk_score, source, category, tenant_name, operator
+  FROM scoped ORDER BY org_id, domain, created_at DESC, id DESC
+)
+SELECT l.org_id::text, l.tenant_name, l.operator, l.domain,
+       l.decision, l.risk_score, l.source, l.category,
+       a.hit_count, a.distinct_users, a.first_seen::text, a.last_seen::text,
+       COALESCE(dv.confidence,''), COALESCE(dv.top_factors,'[]'),
+       COALESCE(dv.signals,'{}'), COALESCE(dv.tools_ran,'[]')
+FROM latest l
+JOIN agg a ON a.org_id = l.org_id AND a.domain = l.domain
+LEFT JOIN system_mgmt.domain_verdicts dv ON dv.org_id = l.org_id AND dv.cache_key = l.cache_key
+ORDER BY a.last_seen DESC
+LIMIT $` + fmt.Sprintf("%d", len(args))
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ConsolidatedRow{}
+	for rows.Next() {
+		var r ConsolidatedRow
+		var factors, signals, toolsRan []byte
+		if err := rows.Scan(&r.TenantID, &r.TenantName, &r.Operator, &r.Domain,
+			&r.Decision, &r.RiskScore, &r.Source, &r.Category,
+			&r.HitCount, &r.DistinctUsers, &r.FirstSeen, &r.LastSeen,
+			&r.Confidence, &factors, &signals, &toolsRan); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(factors, &r.TopFactors)
+		_ = json.Unmarshal(toolsRan, &r.ToolsRan)
+		r.Signals = json.RawMessage(signals)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // GetDecision fetches one decision (any tenant); the caller checks scope via the
 // returned TenantID + Operator.
 func (s *Store) GetDecision(ctx context.Context, id string) (DecisionRow, error) {

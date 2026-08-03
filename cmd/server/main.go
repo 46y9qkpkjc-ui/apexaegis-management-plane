@@ -624,12 +624,13 @@ func main() {
 	deviceClientAPI := router.Group("/api/v1/client")
 	deviceClientAPI.Use(middleware.DeviceMTLSAuth(deviceStore))
 	{
-		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, deviceStore, enforcementCtl, logger)
+		clientRuntimeHandler := handlers.NewClientRuntimeHandler(clientConfigStore, deviceStore, enforcementCtl, auditLog, logger)
 		deviceClientAPI.POST("/bind-user", middleware.JWTAuth(authStore), middleware.RequireRole("client_user"), clientRuntimeHandler.BindUser)
 		deviceClientAPI.GET("/profile", clientRuntimeHandler.GetProfile)
 		deviceClientAPI.GET("/route-policies", clientRuntimeHandler.GetRoutePolicies)
 		deviceClientAPI.POST("/posture", clientRuntimeHandler.ReportPosture)
 		deviceClientAPI.POST("/logs", clientRuntimeHandler.ReportLogs)
+		deviceClientAPI.POST("/network", clientRuntimeHandler.ReportNetwork)
 		// Machine-tunnel DC-scope grant (pre-logon device tunnel; no user).
 		if deviceGrantHandler != nil {
 			deviceClientAPI.POST("/dc-grant", deviceGrantHandler.IssueDCGrant)
@@ -876,14 +877,17 @@ func main() {
 
 	// Agentic risk-ops — the decision log + create-policy-from-log and
 	// create-ticket-from-log, operator+tenant scoped.
+	opsHandler := handlers.NewRiskOpsHandler(riskStore, itsmStore, logger)
 	riskOpsAPI := router.Group("/api/v1/admin/risk")
 	riskOpsAPI.Use(middleware.JWTAuth(authStore))
 	{
-		opsHandler := handlers.NewRiskOpsHandler(riskStore, itsmStore, logger)
 		riskOpsAPI.GET("/decisions", opsHandler.ListDecisions)
 		riskOpsAPI.POST("/decisions/:id/promote-policy", opsHandler.PromoteToPolicy)
 		riskOpsAPI.POST("/decisions/:id/create-ticket", opsHandler.TicketFromDecision)
 	}
+	// Security Events console feed — real, tenant-scoped events (risk adjudications
+	// mapped to the console log shape) that replace the page's demo placeholder.
+	router.GET("/api/v1/admin/security-events", middleware.JWTAuth(authStore), opsHandler.SecurityEvents)
 
 	// Advanced Security Group Tags (SGT) & Branch Sites API
 	sgtAPI := router.Group("/api/v1/sgt")
@@ -993,6 +997,13 @@ func main() {
 	ghostedAdminAPI.Use(middleware.RequireWriteAccess())
 	{
 		ghostedAdminAPI.GET("", tenantHandler.ListGhosted)
+	}
+	// Cross-tenant network-telemetry log for the Network Events page (per device/user,
+	// tenant-scoped via activeScope).
+	networkEventsAPI := router.Group("/api/v1/admin/network-events")
+	networkEventsAPI.Use(middleware.JWTAuth(authStore))
+	{
+		networkEventsAPI.GET("", tenantHandler.NetworkEvents)
 	}
 	// Cross-tenant device inventory for the Device Enrolment page + posture modal.
 	deviceInvAPI := router.Group("/api/v1/admin/devices-inventory")

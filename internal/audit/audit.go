@@ -28,6 +28,7 @@ const (
 	EventSDNConfig     EventType = "sdn_config"
 	EventMeshChange    EventType = "mesh_change"
 	EventAdminAction   EventType = "admin_action"
+	EventPosture       EventType = "posture_report"
 )
 
 // Severity indicates the importance of the audit event.

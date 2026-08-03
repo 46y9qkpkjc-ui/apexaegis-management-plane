@@ -26,7 +26,7 @@ var itsmTypes = map[string]bool{"service_request": true, "change_request": true,
 
 // ListTickets returns tickets visible to the caller (operator fleet / own org).
 func (h *ITSMHandler) ListTickets(c *gin.Context) {
-	rows, err := h.store.List(c.Request.Context(), callerScope(c), 200)
+	rows, err := h.store.List(c.Request.Context(), activeScope(c), 200)
 	if err != nil {
 		h.logger.Error("list itsm tickets", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tickets"})
