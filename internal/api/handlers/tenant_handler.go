@@ -205,6 +205,19 @@ func (h *TenantHandler) NetworkEvents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"events": rows})
 }
 
+// DNSEvents returns the tenant-scoped endpoint DNS-PEP deny log for the DNS-risk /
+// Endpoint Events console page — grouped by device + domain (what the endpoint
+// sinkhole blocked, with the risk score and how often).
+func (h *TenantHandler) DNSEvents(c *gin.Context) {
+	rows, err := h.store.ListDNSEvents(c.Request.Context(), activeScope(c), 200)
+	if err != nil {
+		h.logger.Error("dns events", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load dns events"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"events": rows})
+}
+
 // ListGhosted returns ghosted apps across all tenants (consolidated overview).
 func (h *TenantHandler) ListGhosted(c *gin.Context) {
 	rows, err := h.store.ListGhostedApps(c.Request.Context(), "", activeScope(c))

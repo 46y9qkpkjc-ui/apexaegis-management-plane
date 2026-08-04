@@ -307,6 +307,62 @@ func (s *TenantStore) ListNetworkTelemetry(ctx context.Context, scope TenantScop
 	return out, rows.Err()
 }
 
+// DNSEventRow is one device+domain grouping of endpoint DNS-PEP denies for the
+// console (total denies + max risk score + last-seen).
+type DNSEventRow struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	TenantID   string `json:"tenant_id"`
+	TenantName string `json:"tenant_name"`
+	Operator   string `json:"operator"`
+	Domain     string `json:"domain"`
+	Score      int    `json:"score"`
+	Count      int    `json:"count"`
+	LastSeen   string `json:"last_seen"`
+}
+
+// ListDNSEvents returns endpoint DNS-PEP deny events within the caller's scope,
+// grouped by device + domain (count summed, score maxed, newest first). Backs the
+// DNS-risk / Endpoint Events console view of what the endpoint sinkhole blocked.
+func (s *TenantStore) ListDNSEvents(ctx context.Context, scope TenantScope, limit int) ([]DNSEventRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	q := `SELECT de.device_id::text, COALESCE(d.device_name,''), de.org_id::text, o.name,
+	             COALESCE(o.operator,'ApexAegis (direct)'), de.domain,
+	             MAX(de.score)::int, SUM(de.event_count)::int, MAX(de.last_seen)::text
+	      FROM system_mgmt.device_dns_events de
+	      JOIN system_mgmt.devices d ON d.id = de.device_id
+	      JOIN system_mgmt.organizations o ON o.id = de.org_id
+	      WHERE 1=1`
+	args := []interface{}{}
+	if scope.Operator != "" {
+		args = append(args, scope.Operator)
+		q += fmt.Sprintf(" AND COALESCE(o.operator,'ApexAegis (direct)') = $%d", len(args))
+	} else if scope.OrgID != "" {
+		args = append(args, scope.OrgID)
+		q += fmt.Sprintf(" AND de.org_id = $%d", len(args))
+	}
+	q += ` GROUP BY de.device_id, d.device_name, de.org_id, o.name, o.operator, de.domain`
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY MAX(de.last_seen) DESC LIMIT $%d", len(args))
+	rows, err := s.db.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DNSEventRow{}
+	for rows.Next() {
+		var r DNSEventRow
+		if err := rows.Scan(&r.DeviceID, &r.DeviceName, &r.TenantID, &r.TenantName, &r.Operator,
+			&r.Domain, &r.Score, &r.Count, &r.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ListGhostedApps returns ghosted apps for one tenant, or — when tenantID is
 // empty — every tenant the caller may see (scoped to their operator fleet or
 // single org).

@@ -338,6 +338,53 @@ func (s *DeviceStore) SaveNetworkTelemetry(ctx context.Context, orgID, deviceID 
 	return nil
 }
 
+// DeviceDNSEvent is one aggregated DNS-PEP deny reported by the endpoint sinkhole:
+// a blocked domain with the occurrence count + max risk score seen in the endpoint's
+// flush window. Observability only — blocking happens locally on the device.
+type DeviceDNSEvent struct {
+	Domain   string    `json:"domain"`
+	Decision string    `json:"decision"`
+	Score    int       `json:"score"`
+	Count    int       `json:"count"`
+	At       time.Time `json:"at"`
+}
+
+// SaveDNSEvents persists a batch of endpoint DNS-PEP deny events for one device
+// (org/device already resolved from the cert by the caller). Best-effort and
+// sampled — a failed row returns an error and the endpoint simply drops the batch
+// and reports fresh denies next window, so there is no retry storm or dup risk.
+func (s *DeviceStore) SaveDNSEvents(ctx context.Context, orgID, deviceID string, events []DeviceDNSEvent) error {
+	for _, e := range events {
+		if e.At.IsZero() {
+			e.At = time.Now().UTC()
+		}
+		if e.Score < 0 {
+			e.Score = 0
+		}
+		if e.Score > 100 {
+			e.Score = 100
+		}
+		if e.Count < 1 {
+			e.Count = 1
+		}
+		decision := e.Decision
+		if decision == "" {
+			decision = "deny"
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO system_mgmt.device_dns_events
+			(org_id, device_id, domain, decision, score, event_count, last_seen)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
+		`, orgID, deviceID, e.Domain, decision, e.Score, e.Count, e.At); err != nil {
+			return fmt.Errorf("save dns event: %w", err)
+		}
+	}
+	// Touch the device so last_seen reflects the report (mirrors SaveNetworkTelemetry).
+	_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.devices
+		SET last_seen=now(), updated_at=now() WHERE org_id=$1 AND id=$2`, orgID, deviceID)
+	return nil
+}
+
 // GetIntegrityBaseline returns the device's accepted FIM baseline (path → hash), and
 // whether one has been established yet.
 func (s *DeviceStore) GetIntegrityBaseline(ctx context.Context, orgID, deviceID string) (map[string]string, bool, error) {

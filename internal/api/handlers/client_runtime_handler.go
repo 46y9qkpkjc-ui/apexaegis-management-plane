@@ -513,6 +513,56 @@ func (h *ClientRuntimeHandler) ReportNetwork(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 
+type dnsEventItem struct {
+	Domain   string    `json:"domain"`
+	Decision string    `json:"decision"`
+	Score    int       `json:"score"`
+	Count    int       `json:"count"`
+	At       time.Time `json:"at"`
+}
+
+type dnsEventsRequest struct {
+	TenantID string         `json:"tenant_id"` // ignored — the cert + X-ApexAegis-Tenant-ID are authoritative
+	DeviceID string         `json:"device_id"` // ignored for storage — the cert CN is authoritative
+	Events   []dnsEventItem `json:"events"`
+}
+
+// ReportDNSEvents ingests endpoint DNS-PEP deny events (device-mTLS auth; org/device
+// resolved from the cert, never the body). Blocking happens locally on the device via
+// the sinkhole — this channel is observability only, surfaced on the DNS-risk /
+// Endpoint Events page. Contract: apexaegis-agent/docs/DNS-EVENTS-CONTRACT.md.
+func (h *ClientRuntimeHandler) ReportDNSEvents(c *gin.Context) {
+	orgID, deviceID := c.GetString("org_id"), c.GetString("device_id")
+	if orgID == "" || deviceID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "device identity context is required"})
+		return
+	}
+	var req dnsEventsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid dns events"})
+		return
+	}
+	events := make([]db.DeviceDNSEvent, 0, len(req.Events))
+	for _, e := range req.Events {
+		if e.Domain == "" {
+			continue // never trust a blank domain into the store
+		}
+		events = append(events, db.DeviceDNSEvent{
+			Domain: e.Domain, Decision: e.Decision, Score: e.Score, Count: e.Count, At: e.At,
+		})
+	}
+	if len(events) == 0 {
+		c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "count": 0})
+		return
+	}
+	if err := h.deviceStore.SaveDNSEvents(c.Request.Context(), orgID, deviceID, events); err != nil {
+		h.logger.Error("failed to save dns events", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save dns events"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "count": len(events)})
+}
+
 func defaultRuntimeClientProfile() runtimeClientProfile {
 	return runtimeClientProfile{
 		GroupName: "Default",

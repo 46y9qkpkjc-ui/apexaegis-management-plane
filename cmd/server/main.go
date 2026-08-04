@@ -631,6 +631,7 @@ func main() {
 		deviceClientAPI.POST("/posture", clientRuntimeHandler.ReportPosture)
 		deviceClientAPI.POST("/logs", clientRuntimeHandler.ReportLogs)
 		deviceClientAPI.POST("/network", clientRuntimeHandler.ReportNetwork)
+		deviceClientAPI.POST("/dns-events", clientRuntimeHandler.ReportDNSEvents)
 		// Machine-tunnel DC-scope grant (pre-logon device tunnel; no user).
 		if deviceGrantHandler != nil {
 			deviceClientAPI.POST("/dc-grant", deviceGrantHandler.IssueDCGrant)
@@ -1004,6 +1005,13 @@ func main() {
 	networkEventsAPI.Use(middleware.JWTAuth(authStore))
 	{
 		networkEventsAPI.GET("", tenantHandler.NetworkEvents)
+	}
+	// Cross-tenant endpoint DNS-PEP deny log for the DNS-risk / Endpoint Events page
+	// (grouped by device + domain, tenant-scoped via activeScope).
+	dnsEventsAPI := router.Group("/api/v1/admin/dns-events")
+	dnsEventsAPI.Use(middleware.JWTAuth(authStore))
+	{
+		dnsEventsAPI.GET("", tenantHandler.DNSEvents)
 	}
 	// Cross-tenant device inventory for the Device Enrolment page + posture modal.
 	deviceInvAPI := router.Group("/api/v1/admin/devices-inventory")
