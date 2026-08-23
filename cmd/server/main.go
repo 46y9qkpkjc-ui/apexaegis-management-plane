@@ -35,6 +35,7 @@ import (
 	"github.com/zcp/management-plane/internal/grant"
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
+	"github.com/zcp/management-plane/internal/spa"
 	"github.com/zcp/management-plane/internal/identity"
 	"github.com/zcp/management-plane/internal/policy"
 	"github.com/zcp/management-plane/internal/posture"
@@ -163,6 +164,25 @@ func main() {
 	// excluded from the selectable SWG PoP list and surfaced on /private-gateways.
 	// A broker may also self-declare via registration metadata kind=private-access.
 	gwRegistry.SetPrivateAccessIDs(strings.Split(envOrDefault("PRIVATE_ACCESS_GATEWAY_IDS", "ad-gw.apexaegis.app"), ","))
+
+	// ── SPA client — wake dark gateways before MP→GW gRPC push ──
+	// The MP is an SPA client. When it needs to push gRPC to a dark gateway
+	// (e.g. ad-gw.apexaegis.app), it sends an HMAC-signed wake-up packet over
+	// UDP to open the gateway's iptables gate, then connects TCP:8443 for gRPC/mTLS.
+	var spaClient *spa.RetryClient
+	if spaSecret := os.Getenv("SPA_SHARED_SECRET"); spaSecret != "" {
+		gatewayAddr := envOrDefault("SPA_GATEWAY_ADDR", "ad-gw.apexaegis.app:8443")
+		spaClient = spa.NewRetryClient(spaSecret, 3, 1*time.Second)
+		logger.Info("SPA client initialized",
+			zap.String("gateway_addr", gatewayAddr),
+			zap.Duration("wake_interval", 4*time.Minute),
+		)
+		// Background wake loop: re-wake every 4 min (gateway session is 5 min).
+		go spaWakeLoop(ctx, spaClient, gatewayAddr, logger)
+	} else {
+		logger.Info("SPA client disabled (set SPA_SHARED_SECRET to enable MP→GW wake-up)")
+	}
+	_ = spaClient // used by grpcserver push path
 
 	// ── Auth store (user authentication + JWT) ──
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -1526,4 +1546,32 @@ func cefHeaderEscape(value string) string {
 
 func cefEscape(value string) string {
 	return strings.NewReplacer("\\", "\\\\", "=", "\\=", "|", "\\|", "\n", "\\n", "\r", "\\r").Replace(value)
+}
+
+// spaWakeLoop periodically sends SPA wake-up packets to a dark gateway to
+// keep its iptables gate open for MP→GW gRPC push. The gateway session is
+// typically 5 min; we re-wake every 4 min to avoid a gap.
+func spaWakeLoop(ctx context.Context, client *spa.RetryClient, gatewayAddr string, logger *zap.Logger) {
+	// Send initial wake immediately.
+	if result, err := client.Wake(gatewayAddr); err != nil {
+		logger.Warn("SPA initial wake-up failed", zap.String("gateway", gatewayAddr), zap.Error(err))
+	} else {
+		logger.Info("SPA gate opened", zap.String("gateway", gatewayAddr), zap.Uint32("session_id", result.SessionID))
+	}
+
+	ticker := time.NewTicker(4 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if result, err := client.Wake(gatewayAddr); err != nil {
+				logger.Warn("SPA re-wake failed", zap.String("gateway", gatewayAddr), zap.Error(err))
+			} else {
+				logger.Debug("SPA gate refreshed", zap.String("gateway", gatewayAddr), zap.Uint32("session_id", result.SessionID))
+			}
+		}
+	}
 }
