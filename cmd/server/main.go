@@ -28,6 +28,7 @@ import (
 	"github.com/zcp/management-plane/internal/audit"
 	"github.com/zcp/management-plane/internal/auth"
 	"github.com/zcp/management-plane/internal/db"
+	"github.com/zcp/management-plane/internal/dnsrisk"
 	"github.com/zcp/management-plane/internal/dot1x"
 	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/gateway"
@@ -124,6 +125,7 @@ func main() {
 	// Mints the private-access grant the gateway verifies; uses the SAME shared
 	// signing key the gateways verify with. Optional — disabled if the key is unset.
 	var deviceGrantHandler *handlers.DeviceGrantHandler
+	var dnsRiskHandler *handlers.DNSRiskHandler
 	if grantKey := os.Getenv("PRIVATE_ACCESS_GRANT_SIGNING_KEY"); grantKey != "" {
 		// 20-min TTL (not the 5-min default): grants are cross-cloud (AWS MP →
 		// Azure ad-gw) and a short TTL is fragile against clock skew. Still short
@@ -596,6 +598,11 @@ func main() {
 		if deviceGrantHandler != nil {
 			deviceClientAPI.POST("/dc-grant", deviceGrantHandler.IssueDCGrant)
 		}
+
+		// DNS risk assessment PDP: agent/desktop Coach page queries this to
+		// explain why a domain was blocked instead of showing ERR_NAME_NOT_RESOLVED.
+		// dnsRiskHandler is initialized after the threat/dns log stores are created.
+		deviceClientAPI.POST("/dns-risk/assess", func(c *gin.Context) { dnsRiskHandler.Assess(c) })
 	}
 
 	// MP-brokered device enrolment (unauthenticated — the per-org enrolment secret
@@ -737,6 +744,25 @@ func main() {
 		adminAPI.POST("/enrol-secrets", enrolHandler.GenerateSecret)
 		adminAPI.GET("/enrol-secrets", enrolHandler.ListSecrets)
 		adminAPI.DELETE("/enrol-secrets/:id", enrolHandler.RevokeSecret)
+
+		// ITSM Service Request management (admin CRUD for SOC/NOC/CAB)
+		itmStore := db.NewITSMStore(dbConn, logger)
+		itmHandler := handlers.NewITSMHandler(itmStore, logger)
+		adminAPI.GET("/itsm/tickets", itmHandler.ListRequests)
+		adminAPI.GET("/itsm/tickets/:id", itmHandler.GetRequest)
+		adminAPI.PATCH("/itsm/tickets/:id", itmHandler.UpdateRequest)
+		adminAPI.DELETE("/itsm/tickets/:id", itmHandler.DeleteRequest)
+		adminAPI.GET("/itsm/stats", itmHandler.GetStats)
+	}
+
+	// ── Public ITSM API (EUN Coach portal — JWT auth required) ──
+	itmStore := db.NewITSMStore(dbConn, logger)
+	itmHandler := handlers.NewITSMHandler(itmStore, logger)
+	itsmAPI := router.Group("/api/v1/itsm")
+	itsmAPI.Use(middleware.JWTAuth(authStore))
+	{
+		itsmAPI.POST("/requests", itmHandler.CreateRequest)
+		itsmAPI.GET("/requests/:id", itmHandler.GetRequest)
 	}
 
 	// ── Audit middleware — log all mutations to audit trail ──
@@ -1022,6 +1048,12 @@ func main() {
 	}
 
 	logger.Info("DNS logging API initialized")
+
+	// Initialize the DNS risk assessment PDP now that threat and DNS log stores exist.
+	dnsRiskHandler = handlers.NewDNSRiskHandler(
+		dnsrisk.NewEngine(threatStore, dnsLogStore, dnsrisk.NewClientConfigPolicyResolver(clientConfigStore)),
+		logger,
+	)
 
 	// Security Validation API (container-based test infrastructure)
 	validationAPI := router.Group("/api/v1/validation")
