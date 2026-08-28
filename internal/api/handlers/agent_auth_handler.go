@@ -28,10 +28,12 @@ func NewAgentAuthHandler(deviceStore *db.DeviceStore, authStore *db.AuthStore, l
 }
 
 type agentAuthRequest struct {
-	TenantID string `json:"tenant_id"`
-	DeviceID string `json:"device_id"`
-	Platform string `json:"platform"`
-	ClientID string `json:"client_id"`
+	TenantID     string `json:"tenant_id"`
+	DeviceID     string `json:"device_id"`
+	Platform     string `json:"platform"`
+	ClientID     string `json:"client_id"`
+	DomainJoined string `json:"domain_joined"` // "true" when user is signed in with a domain account
+	UPN          string `json:"upn"`           // userPrincipalName (user@domain) when domain-joined
 }
 
 type mtlsClientIdentity struct {
@@ -99,17 +101,21 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		h.logger.Warn("failed to resolve device groups", zap.String("device_id", deviceID), zap.Error(gerr))
 	}
 
-	// Device-certificate auth alone does not prove a domain login, so the token
-	// is issued without a domain attestation. Domain users obtain a
-	// domain_joined token via the Kerberos SSO flow; the gateway also admits
-	// linked domain devices via their UPN / "Domain Users" group.
+	// Domain-join attestation: the agent sends domain_joined:"true" when the
+	// user is signed in with a domain (AD) account. Stamp this into the JWT so
+	// the gateway can enforce domain-only admission.
+	domain := db.AgentTokenDomain{
+		DomainJoined: strings.EqualFold(req.DomainJoined, "true"),
+		UPN:          req.UPN,
+	}
+
 	jwt, expiresAt, err := h.authStore.IssueAgentToken(
 		req.TenantID,
 		reg.ID,
 		identity.FingerprintSHA256,
 		identity.Serial,
 		groups,
-		db.AgentTokenDomain{},
+		domain,
 	)
 	if err != nil {
 		h.logger.Error("failed to issue agent token", zap.String("device_id", deviceID), zap.Error(err))
@@ -130,6 +136,8 @@ func (h *AgentAuthHandler) Authenticate(c *gin.Context) {
 		zap.String("platform", req.Platform),
 		zap.String("cert_serial", identity.Serial),
 		zap.Bool("tls_socket_cert", identity.PresentedByTLSSocket),
+		zap.Bool("domain_joined", domain.DomainJoined),
+		zap.String("upn", domain.UPN),
 	)
 	c.JSON(http.StatusOK, gin.H{
 		"token":         jwt,
