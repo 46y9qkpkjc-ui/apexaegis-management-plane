@@ -36,8 +36,10 @@ import (
 	"github.com/zcp/management-plane/internal/grpc/dnssec"
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
+	"github.com/zcp/management-plane/internal/mdm"
 	"github.com/zcp/management-plane/internal/policy"
 	"github.com/zcp/management-plane/internal/scanner"
+	"github.com/zcp/management-plane/internal/scep"
 	"github.com/zcp/management-plane/internal/sdn"
 	"github.com/zcp/management-plane/internal/security"
 	"github.com/zcp/management-plane/internal/segment"
@@ -1097,6 +1099,38 @@ func main() {
 		securityAPI.GET("/commands", secHandler.ListCommands)
 		securityAPI.GET("/commands/pending/:targetId", secHandler.GetPendingCommands)
 	}
+
+	// ── SCEP Server (device certificate enrollment) ──
+	// Serves the full SCEP protocol: GetCACert, GetCACaps, PKIOperation.
+	// Used by Windows OMA-DM, Apple MDM, and Android Enterprise for cert issuance.
+	scepCA, scepErr := scep.NewCA("Apex Aegis Device CA", 10)
+	if scepErr != nil {
+		logger.Warn("SCEP CA disabled", zap.Error(scepErr))
+	} else {
+		// SCEP uses a dedicated endpoint without JWT auth — devices authenticate via challenge
+		scepHandler := scep.NewHandler(scepCA, nil, logger)
+		router.GET("/scep", gin.WrapF(scepHandler.ServeHTTP))
+		router.POST("/scep", gin.WrapF(scepHandler.ServeHTTP))
+		logger.Info("SCEP server enabled", zap.String("ca_cn", "Apex Aegis Device CA"))
+	}
+
+	// ── Token Exchange (RFC 8693) ──
+	// Enables identity federation between Apex Aegis IDP and external IdPs
+	tokenExchange := identity.NewRFC8693Service([]byte(jwtSecret), logger)
+	identityAPI := router.Group("/api/v1/auth")
+	identityAPI.POST("/token/exchange", tokenExchange.ExchangeHandler)
+	identityAPI.POST("/token/introspect", tokenExchange.IntrospectHandler)
+	logger.Info("Token Exchange (RFC 8693) enabled")
+
+	// ── MDM Endpoints (Windows OMA-DM, Android Enterprise, Apple MDM) ──
+	mdmHandler := mdm.NewHandler(deviceStore, nil, logger)
+	mdmAPI := router.Group("/api/v1/mdm")
+	mdmHandler.RegisterRoutes(mdmAPI)
+	logger.Info("MDM endpoints enabled",
+		zap.String("checkin", "/api/v1/mdm/checkin"),
+		zap.String("management", "/api/v1/mdm/management"),
+		zap.String("android_webhook", "/api/v1/mdm/webhook/android"),
+	)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":443")
 	deployMode := envOrDefault("DEPLOY_MODE", "cloud")
