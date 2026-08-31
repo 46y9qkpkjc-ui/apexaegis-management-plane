@@ -24,6 +24,7 @@ type EnrolSecret struct {
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ConsumedAt *time.Time `json:"consumed_at,omitempty"`
 }
 
 // EnrolSecretStore manages per-org device enrolment secrets. Secrets are stored
@@ -77,7 +78,8 @@ func (s *EnrolSecretStore) Generate(ctx context.Context, orgID, label, createdBy
 }
 
 // Validate reports whether the plaintext secret matches an active secret for the
-// org, stamping last_used_at on a hit.
+// org. On first use the secret is consumed (status → 'consumed') so the same
+// token cannot enroll a second device. Returns false for consumed/revoked secrets.
 func (s *EnrolSecretStore) Validate(ctx context.Context, orgID, plaintext string) (bool, error) {
 	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(plaintext) == "" {
 		return false, nil
@@ -93,14 +95,25 @@ func (s *EnrolSecretStore) Validate(ctx context.Context, orgID, plaintext string
 	if err != nil {
 		return false, err
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE system_mgmt.org_enrol_secrets SET last_used_at = now() WHERE id = $1`, id)
+	// Atomically consume the secret so no other device can use it.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE system_mgmt.org_enrol_secrets
+		SET status = 'consumed', last_used_at = now(), consumed_at = now()
+		WHERE id = $1 AND status = 'active'`, id)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Race: another request consumed it first.
+		return false, nil
+	}
 	return true, nil
 }
 
 // List returns the org's secrets (metadata only, never the secret value).
 func (s *EnrolSecretStore) List(ctx context.Context, orgID string) ([]EnrolSecret, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id::string, org_id::string, label, prefix, status, created_at, last_used_at
+		SELECT id::string, org_id::string, label, prefix, status, created_at, last_used_at, consumed_at
 		FROM system_mgmt.org_enrol_secrets WHERE org_id = $1 ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
@@ -109,12 +122,15 @@ func (s *EnrolSecretStore) List(ctx context.Context, orgID string) ([]EnrolSecre
 	out := []EnrolSecret{}
 	for rows.Next() {
 		var e EnrolSecret
-		var lastUsed sql.NullTime
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.Label, &e.Prefix, &e.Status, &e.CreatedAt, &lastUsed); err != nil {
+		var lastUsed, consumedAt sql.NullTime
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.Label, &e.Prefix, &e.Status, &e.CreatedAt, &lastUsed, &consumedAt); err != nil {
 			return nil, err
 		}
 		if lastUsed.Valid {
 			e.LastUsedAt = &lastUsed.Time
+		}
+		if consumedAt.Valid {
+			e.ConsumedAt = &consumedAt.Time
 		}
 		out = append(out, e)
 	}
