@@ -122,6 +122,7 @@ func main() {
 	urlCategoryStore := db.NewURLCategoryStore(dbConn, logger)
 	policyObjectStore := db.NewPolicyObjectStore(dbConn, logger)
 	clientConfigStore := db.NewClientConfigStore(dbConn, logger)
+	featureFlagStore := db.NewFeatureFlagStore(dbConn)
 
 	// ── Device-grant issuer (machine-tunnel DC-scope grants) ──
 	// Mints the private-access grant the gateway verifies; uses the SAME shared
@@ -227,7 +228,8 @@ func main() {
 	// delegates the access decision to the dot1x PDP above. Disabled unless the
 	// RadSec/EAP cert material is configured (RADSEC_*_FILE env).
 	if rscfg, ok := radsec.ConfigFromEnv(); ok {
-		if rs, err := radsec.NewServer(rscfg, &radsecPDP{auth: dot1xAuth}, logger); err != nil {
+		radsecChecker := db.NewRadSecFeatureChecker(featureStore)
+		if rs, err := radsec.NewServer(rscfg, &radsecPDP{auth: dot1xAuth}, radsecChecker, tenantOrgID, logger); err != nil {
 			logger.Error("radsec: disabled — cert load failed", zap.Error(err))
 		} else {
 			go rs.Run(ctx)
@@ -648,6 +650,13 @@ func main() {
 		adminAPI.GET("/policies", adminHandler.ListPolicies)
 		adminAPI.DELETE("/policies/:id", adminHandler.DeletePolicy)
 		adminAPI.GET("/mesh/topology", adminHandler.GetMeshTopology)
+
+		// Feature flags (RadSec, Kerberos SSO, etc.)
+		featureFlagHandler := handlers.NewFeatureFlagHandler(featureFlagStore, logger)
+		adminAPI.GET("/features", featureFlagHandler.ListFlags)
+		adminAPI.GET("/features/:name", featureFlagHandler.GetFlag)
+		adminAPI.PUT("/features/:name", featureFlagHandler.SetFlag)
+
 		adminAPI.GET("/organization/deployment-info", func(c *gin.Context) {
 			orgID := c.GetString("org_id")
 			if orgID == "" {

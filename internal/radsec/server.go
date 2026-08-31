@@ -37,6 +37,12 @@ type PolicyEngine interface {
 	Decide(cert *x509.Certificate, nasIdentifier, callingStation, orgID string) Decision
 }
 
+// FeatureFlagChecker is called periodically to check if the feature is enabled.
+// If the checker returns false, the server stops accepting new connections.
+type FeatureFlagChecker interface {
+	IsEnabled(orgID, flagName string) (bool, error)
+}
+
 // Config holds the RadSec server configuration. Each cert/key/CA may be supplied
 // either as a file path (*_FILE) or inline PEM (*_PEM). Inline PEM takes
 // precedence and suits secret-injection on Fargate (SSM/Secrets Manager → env).
@@ -98,6 +104,8 @@ func envDefault(k, def string) string {
 type Server struct {
 	cfg      Config
 	pdp      PolicyEngine
+	featureChecker FeatureFlagChecker // nil = always enabled
+	orgID    string                  // org to check feature flag against
 	logger   *zap.Logger
 	outerCfg *tls.Config // RadSec transport (Cert B, verify proxy A)
 	innerCfg *tls.Config // inner EAP-TLS (Cert D, verify supplicant C)
@@ -108,11 +116,15 @@ type Server struct {
 	// live maps a device (by Acct-Session / username) to its proxy conn for
 	// best-effort server-initiated CoA/Disconnect over the same RadSec link.
 	live map[string]net.Conn
+
+	// enabled is toggled by the feature flag checker. Starts true (certs loaded).
+	enabledMu sync.RWMutex
+	enabled   bool
 }
 
 // NewServer loads cert material and builds the server. Returns an error if any
-// cert/key/CA fails to load.
-func NewServer(cfg Config, pdp PolicyEngine, logger *zap.Logger) (*Server, error) {
+// cert/key/CA fails to load. featureChecker may be nil (always enabled).
+func NewServer(cfg Config, pdp PolicyEngine, featureChecker FeatureFlagChecker, orgID string, logger *zap.Logger) (*Server, error) {
 	serverCert, err := loadKeyPair(cfg.ServerCertPEM, cfg.ServerKeyPEM, cfg.ServerCertFile, cfg.ServerKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load RadSec server cert (B): %w", err)
@@ -131,11 +143,14 @@ func NewServer(cfg Config, pdp PolicyEngine, logger *zap.Logger) (*Server, error
 	}
 
 	s := &Server{
-		cfg:      cfg,
-		pdp:      pdp,
-		logger:   logger,
-		sessions: make(map[string]*session),
-		live:     make(map[string]net.Conn),
+		cfg:            cfg,
+		pdp:            pdp,
+		featureChecker: featureChecker,
+		orgID:          orgID,
+		logger:         logger,
+		enabled:        true,
+		sessions:       make(map[string]*session),
+		live:           make(map[string]net.Conn),
 		outerCfg: &tls.Config{
 			Certificates: []tls.Certificate{serverCert},
 			ClientAuth:   tls.RequireAndVerifyClientCert,
@@ -183,6 +198,8 @@ func loadCertPool(pemStr, file string) (*x509.CertPool, error) {
 }
 
 // Run starts the RadSec listener and serves until ctx is cancelled.
+// If a FeatureFlagChecker is configured, it checks the flag periodically and
+// stops accepting new connections when the feature is disabled.
 func (s *Server) Run(ctx context.Context) {
 	ln, err := tls.Listen("tcp", s.cfg.ListenAddr, s.outerCfg)
 	if err != nil {
@@ -197,6 +214,7 @@ func (s *Server) Run(ctx context.Context) {
 	}()
 
 	go s.reaper(ctx)
+	go s.featureFlagPoller(ctx)
 
 	for {
 		conn, err := ln.Accept()
@@ -209,7 +227,57 @@ func (s *Server) Run(ctx context.Context) {
 				continue
 			}
 		}
+		// Reject connections when feature is disabled
+		if !s.isEnabled() {
+			s.logger.Warn("radsec: connection rejected — feature disabled via admin toggle")
+			_ = conn.Close()
+			continue
+		}
 		go s.handleConn(ctx, conn)
+	}
+}
+
+// isEnabled returns the current feature flag state (thread-safe).
+func (s *Server) isEnabled() bool {
+	s.enabledMu.RLock()
+	defer s.enabledMu.RUnlock()
+	return s.enabled
+}
+
+// setEnabled updates the feature flag state (thread-safe).
+func (s *Server) setEnabled(v bool) {
+	s.enabledMu.Lock()
+	defer s.enabledMu.Unlock()
+	s.enabled = v
+}
+
+// featureFlagPoller checks the feature flag every 30 seconds and toggles the
+// server state accordingly. When the flag goes false, existing sessions continue
+// but no new connections are accepted.
+func (s *Server) featureFlagPoller(ctx context.Context) {
+	if s.featureChecker == nil {
+		return
+	}
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			enabled, err := s.featureChecker.IsEnabled(s.orgID, "radsec")
+			if err != nil {
+				s.logger.Warn("radsec: feature flag check failed", zap.Error(err))
+				continue
+			}
+			wasEnabled := s.isEnabled()
+			s.setEnabled(enabled)
+			if wasEnabled && !enabled {
+				s.logger.Info("radsec: feature DISABLED by admin — stopping new connections")
+			} else if !wasEnabled && enabled {
+				s.logger.Info("radsec: feature ENABLED by admin — accepting connections")
+			}
+		}
 	}
 }
 

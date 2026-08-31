@@ -10,8 +10,13 @@
 #
 # DNS: create radius.apexaegis.app as a CNAME/ALIAS to the NLB, DNS-ONLY (grey-cloud
 # in Cloudflare). Cloudflare's HTTP proxy cannot carry RadSec (would need Spectrum).
+#
+# Controlled by var.enable_radsec (default false). When disabled, no RadSec
+# infrastructure is created. The runtime feature flag (DB) controls whether
+# the listener serves traffic when infrastructure exists.
 
 resource "aws_security_group" "radsec_nlb" {
+  count       = var.enable_radsec ? 1 : 0
   name        = "apexaegis-radsec-nlb"
   description = "RadSec NLB - RADIUS-over-TLS on 443"
   vpc_id      = data.aws_vpc.default.id
@@ -35,10 +40,11 @@ resource "aws_security_group" "radsec_nlb" {
 }
 
 resource "aws_lb" "radsec" {
+  count              = var.enable_radsec ? 1 : 0
   name               = "apexaegis-radsec"
   internal           = false
   load_balancer_type = "network"
-  security_groups    = [aws_security_group.radsec_nlb.id]
+  security_groups    = [aws_security_group.radsec_nlb[0].id]
   subnets            = data.aws_subnets.default.ids
 
   enable_cross_zone_load_balancing = true
@@ -47,6 +53,7 @@ resource "aws_lb" "radsec" {
 }
 
 resource "aws_lb_target_group" "radsec" {
+  count       = var.enable_radsec ? 1 : 0
   name_prefix = "apx-rs"
   port        = 2083
   protocol    = "TCP"
@@ -71,29 +78,31 @@ resource "aws_lb_target_group" "radsec" {
 }
 
 resource "aws_lb_listener" "radsec" {
-  load_balancer_arn = aws_lb.radsec.arn
+  count             = var.enable_radsec ? 1 : 0
+  load_balancer_arn = aws_lb.radsec[0].arn
   port              = 443
   protocol          = "TCP" # PASSTHROUGH — must NOT terminate TLS here
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.radsec.arn
+    target_group_arn = aws_lb_target_group.radsec[0].arn
   }
 }
 
 # Allow the RadSec container port from the NLB only (NLB has a security group, so
 # the task SG can reference it even with client-IP preservation on).
 resource "aws_security_group_rule" "ecs_task_radsec" {
+  count                    = var.enable_radsec ? 1 : 0
   type                     = "ingress"
   from_port                = 2083
   to_port                  = 2083
   protocol                 = "tcp"
   security_group_id        = aws_security_group.ecs_task.id
-  source_security_group_id = aws_security_group.radsec_nlb.id
+  source_security_group_id = aws_security_group.radsec_nlb[0].id
   description              = "RadSec from the radius NLB"
 }
 
 output "radsec_nlb_dns" {
   description = "Point radius.apexaegis.app (DNS-only, NOT Cloudflare-proxied) at this NLB"
-  value       = aws_lb.radsec.dns_name
+  value       = var.enable_radsec ? aws_lb.radsec[0].dns_name : ""
 }
