@@ -148,7 +148,7 @@ func NewServer(cfg Config, pdp PolicyEngine, featureChecker FeatureFlagChecker, 
 		featureChecker: featureChecker,
 		orgID:          orgID,
 		logger:         logger,
-		enabled:        true,
+		enabled:        false, // start disabled; featureFlagPoller enables after first DB check
 		sessions:       make(map[string]*session),
 		live:           make(map[string]net.Conn),
 		outerCfg: &tls.Config{
