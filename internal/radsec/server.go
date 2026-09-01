@@ -198,66 +198,44 @@ func loadCertPool(pemStr, file string) (*x509.CertPool, error) {
 }
 
 // Run starts the RadSec listener and serves until ctx is cancelled.
-// When a FeatureFlagChecker is configured, the listener is closed entirely when
-// the feature is disabled (no TCP accept, no TLS handshake, no goroutine waste).
-// This kills DDoS traffic at the network level rather than rejecting post-accept.
+// The TCP listener is ALWAYS open (so NLB health checks pass and ECS keeps
+// the task alive).  When the feature is disabled, every accepted connection
+// is closed immediately — no TLS handshake, no goroutine, no proxy.  This
+// drops DDoS traffic at near-zero cost while keeping the port reachable
+// for health probes.
 func (s *Server) Run(ctx context.Context) {
 	go s.reaper(ctx)
 	go s.featureFlagPoller(ctx)
 
-	// If feature starts disabled and we have a checker, wait before opening.
-	if s.featureChecker != nil && !s.isEnabled() {
-		s.logger.Info("radsec: feature disabled at startup — listener deferred")
+	ln, err := tls.Listen("tcp", s.cfg.ListenAddr, s.outerCfg)
+	if err != nil {
+		s.logger.Fatal("radsec: listen failed", zap.String("addr", s.cfg.ListenAddr), zap.Error(err))
+	}
+	defer ln.Close()
+	s.logger.Info("radsec: TCP listener open", zap.String("addr", s.cfg.ListenAddr))
+
+	if !s.isEnabled() {
+		s.logger.Info("radsec: feature disabled at startup — connections will be dropped")
 	}
 
-	var ln net.Listener
 	for {
-		// Feature disabled → close listener, drain, wait.
-		if !s.isEnabled() {
-			if ln != nil {
-				s.logger.Info("radsec: feature disabled — closing listener (DDoS protection)")
-				_ = ln.Close()
-				ln = nil
-			}
-			// Poll every 2s for re-enable (featureFlagPoller updates s.enabled every 30s).
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-				continue
-			}
-		}
-
-		// Feature enabled → open listener if not already open.
-		if ln == nil {
-			var err error
-			ln, err = tls.Listen("tcp", s.cfg.ListenAddr, s.outerCfg)
-			if err != nil {
-				s.logger.Error("radsec: listen failed", zap.String("addr", s.cfg.ListenAddr), zap.Error(err))
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(5 * time.Second):
-					continue
-				}
-			}
-			s.logger.Info("radsec: Cloud RADIUS (RADIUS-over-TLS) listening", zap.String("addr", s.cfg.ListenAddr))
-		}
-
 		conn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				// Listener was closed by feature-flag toggle; loop will reopen if enabled.
-				if ln == nil {
-					continue
-				}
 				s.logger.Warn("radsec: accept error", zap.Error(err))
 				continue
 			}
 		}
+
+		if !s.isEnabled() {
+			// Feature disabled: close immediately (DDoS drop, no TLS).
+			conn.Close()
+			continue
+		}
+
 		go s.handleConn(ctx, conn)
 	}
 }
