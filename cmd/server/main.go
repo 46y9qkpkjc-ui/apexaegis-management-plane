@@ -386,13 +386,14 @@ func main() {
 		drsAPI.DELETE("/device/:id", drsHandler.Deregister)
 	}
 
-	// Windows native "Add Work Account" endpoints (DRS protocol)
+	// Windows native "Add Work Account" / Entra Join endpoints (DRS protocol)
 	windowsDRSHandler := drs.NewWindowsHandler(drsService, logger)
-	router.POST("/enrollmentserver/mgmtmanage", windowsDRSHandler.HandleEnrollmentServer)
-	router.POST("/enrollmentserver/keytransfer", windowsDRSHandler.HandleKeyTransfer)
-	router.POST("/enrollmentserver/deviceauth", windowsDRSHandler.HandleDeviceAuth)
+	router.POST("/enrollmentserver/devicejoin", windowsDRSHandler.HandleDeviceJoin)
+	router.POST("/enrollmentserver/devicejoin/status", windowsDRSHandler.HandleDeviceJoinStatus)
 	router.GET("/enrollmentserver/scp", windowsDRSHandler.SCPResponse)
-	router.GET("/enrollmentserver/oidc-callback", windowsDRSHandler.HandleOIDCCallback)
+	router.GET("/windows-hello/policy", windowsDRSHandler.HandleWindowsHelloPolicy)
+	router.POST("/windows-hello/attest", windowsDRSHandler.HandleWindowsHelloAttest)
+	router.GET("/mdm/enrollment", windowsDRSHandler.HandleMDMEnrollment)
 
 	logger.Info("DRS service initialized", zap.String("ca_url", caURL),
 		zap.String("windows_enrollment", drsIssuer+"/enrollmentserver/mgmtmanage"))
