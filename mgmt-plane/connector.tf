@@ -131,3 +131,19 @@ output "connector_api_endpoint" {
   description = "MP_URL the connector dials (mTLS, Infra-CA client cert)."
   value       = "https://${var.connector_domain}"
 }
+
+# ── drs.apexaegis.app -> mgmt ALB (DNS-only; OIDC provider + DRS) ──────────
+resource "cloudflare_record" "drs" {
+  zone_id = data.cloudflare_zone.apexaegis.id
+  name    = trimsuffix(var.drs_domain, ".${var.cloudflare_zone_name}")
+  content = aws_lb.mgmt.dns_name
+  type    = "CNAME"
+  ttl     = var.dns_ttl
+  proxied = false
+  comment = "ApexAegis DRS (OIDC provider + device registration) — Terraform"
+}
+
+output "drs_endpoint" {
+  description = "DRS OIDC issuer URL."
+  value       = "https://${var.drs_domain}"
+}

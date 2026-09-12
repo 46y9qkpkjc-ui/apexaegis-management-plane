@@ -199,6 +199,12 @@ variable "dns_ttl" {
   default     = 60
 }
 
+variable "drs_domain" {
+  description = "DRS (Device Registration Service) domain — OIDC provider + device registration endpoint."
+  type        = string
+  default     = "drs.apexaegis.app"
+}
+
 variable "device_certificate_authority_arn" {
   description = "AWS Private CA ARN used to sign client-generated device CSRs."
   type        = string
