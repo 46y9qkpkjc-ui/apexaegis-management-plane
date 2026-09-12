@@ -30,6 +30,7 @@ import (
 	"github.com/zcp/management-plane/internal/db"
 	"github.com/zcp/management-plane/internal/dnsrisk"
 	"github.com/zcp/management-plane/internal/dot1x"
+	"github.com/zcp/management-plane/internal/drs"
 	"github.com/zcp/management-plane/internal/radsec"
 	"github.com/zcp/management-plane/internal/gateway"
 	"github.com/zcp/management-plane/internal/grant"
@@ -37,6 +38,7 @@ import (
 	"github.com/zcp/management-plane/internal/grpcserver"
 	"github.com/zcp/management-plane/internal/identity"
 	"github.com/zcp/management-plane/internal/mdm"
+	"github.com/zcp/management-plane/internal/oidc"
 	"github.com/zcp/management-plane/internal/policy"
 	"github.com/zcp/management-plane/internal/scanner"
 	"github.com/zcp/management-plane/internal/scep"
@@ -332,6 +334,59 @@ func main() {
 		c.Header("Cache-Control", "public, max-age=3600")
 		c.Data(200, "application/json", jwksJSON)
 	})
+
+	// ── OIDC Provider + DRS (ApexAegis Identity Service) ──
+	drsIssuer := envOrDefault("DRS_ISSUER_URL", "https://drs.apexaegis.app")
+	oidcStore := db.NewOIDCDRSStore(dbConn, logger)
+
+	oidcProvider, oidcErr := oidc.NewProvider(oidc.Config{
+		Issuer: drsIssuer,
+	}, logger)
+	if oidcErr != nil {
+		logger.Error("Failed to initialize OIDC provider", zap.Error(oidcErr))
+	} else {
+		oidcHandler := oidc.NewHandler(oidcProvider, oidcStore, logger)
+
+		// OIDC discovery + JWKS (uses own keys, not the MP JWKS)
+		router.GET("/.well-known/openid-configuration", oidcHandler.Discovery)
+		router.GET("/oidc/.well-known/jwks.json", oidcHandler.JWKS)
+
+		// OIDC authorize flow (browser login)
+		router.GET("/authorize", oidcHandler.Authorize)
+		router.POST("/authorize", oidcHandler.AuthorizeLogin)
+
+		// OIDC token endpoint
+		router.POST("/token", oidcHandler.Token)
+
+		// OIDC device code flow
+		router.POST("/device/code", oidcHandler.DeviceCode)
+		router.GET("/device", oidcHandler.DevicePage)
+		router.POST("/device", oidcHandler.DeviceVerify)
+
+		// OIDC userinfo + revocation
+		router.GET("/userinfo", oidcHandler.UserInfo)
+		router.POST("/revoke", oidcHandler.Revoke)
+
+		logger.Info("OIDC provider initialized", zap.String("issuer", drsIssuer))
+	}
+
+	// DRS (Device Registration Service)
+	caURL := envOrDefault("DEVICE_STEPCA_URL", "https://device-ca.apexaegis.app")
+	caFP := envOrDefault("DEVICE_STEPCA_FINGERPRINT", "")
+	drsService := drs.NewService(oidcStore, caURL, caFP, drsIssuer, logger)
+	drsHandler := drs.NewHandler(drsService, logger)
+
+	drsAPI := router.Group("/drs/v1")
+	{
+		drsAPI.POST("/register", drsHandler.Register)
+		drsAPI.POST("/complete", drsHandler.Complete)
+		drsAPI.GET("/device/:id", drsHandler.GetDevice)
+		drsAPI.PUT("/device/:id/posture", drsHandler.UpdatePosture)
+		drsAPI.POST("/device/:id/renew", drsHandler.RenewCert)
+		drsAPI.DELETE("/device/:id", drsHandler.Deregister)
+	}
+
+	logger.Info("DRS service initialized", zap.String("ca_url", caURL))
 
 	// Authentication API (public — no JWT required)
 	authAPI := router.Group("/api/v1/auth")
