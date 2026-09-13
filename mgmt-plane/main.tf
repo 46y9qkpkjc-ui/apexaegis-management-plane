@@ -121,6 +121,12 @@ variable "device_stepca_provisioner" {
   default     = "portal"
 }
 
+variable "drs_issuer_url" {
+  description = "DRS OIDC issuer URL. This is the base URL for the DRS provider."
+  type        = string
+  default     = "https://drs.apexaegis.app"
+}
+
 variable "device_grant_dc_segments" {
   description = "JSON map of DC segments a machine tunnel may reach pre-logon: {\"*\":{\"host\":\"<DC IP>\",\"ports\":[...]}}."
   type        = string
@@ -645,22 +651,20 @@ resource "aws_ecs_task_definition" "mgmt" {
     image     = local.ecr_image
     essential = true
 
-    portMappings = [
-      {
-        containerPort = 443
-        protocol      = "tcp"
-      },
-    ]
-
-    # RadSec (RADIUS-over-TLS) container port — only created when var.enable_radsec = true.
-    # The runtime feature flag in the DB controls whether the listener actually serves.
-    dynamic "portMappings" {
-      for_each = var.enable_radsec ? [1] : []
-      content {
-        containerPort = 2083
-        protocol      = "tcp"
-      }
-    }
+    portMappings = concat(
+      [
+        {
+          containerPort = 443
+          protocol      = "tcp"
+        },
+      ],
+      var.enable_radsec ? [
+        {
+          containerPort = 2083
+          protocol      = "tcp"
+        },
+      ] : [],
+    )
 
     environment = [
       { name = "LISTEN_ADDR", value = ":443" },
@@ -692,6 +696,9 @@ resource "aws_ecs_task_definition" "mgmt" {
       { name = "DEVICE_STEPCA_URL", value = var.device_stepca_url },
       { name = "DEVICE_STEPCA_FINGERPRINT", value = var.device_stepca_fingerprint },
       { name = "DEVICE_STEPCA_PROVISIONER", value = var.device_stepca_provisioner },
+      # DRS (Device Registration Service) — OIDC provider for device enrollment.
+      # This is the issuer URL for the DRS OIDC provider.
+      { name = "DRS_ISSUER_URL", value = var.drs_issuer_url },
       # Kerberos SSO (POST /api/v1/agent/sso/kerberos): the SPN the client
       # acquires a service ticket for, and the AD realm. Non-secret; the keytab
       # itself rides MP_KRB5_KEYTAB_B64 (SSM SecureString, in secrets below).
@@ -700,16 +707,11 @@ resource "aws_ecs_task_definition" "mgmt" {
       # Cloud RADIUS (RadSec + EAP-TLS) listener address. Cert material rides the
       # RADSEC_*_PEM secrets below (SSM SecureStrings, out-of-band). With those unset
       # the RadSec server stays disabled and nothing else is affected.
-    ]
-
-    # RadSec env var — only injected when infrastructure exists
-    dynamic "environment" {
-      for_each = var.enable_radsec ? [1] : []
-      content {
+      var.enable_radsec ? {
         name  = "RADSEC_LISTEN_ADDR"
         value = ":2083"
-      }
-    }
+      } : null,
+    ]
 
     secrets = [
       {
@@ -762,23 +764,6 @@ resource "aws_ecs_task_definition" "mgmt" {
         valueFrom = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/kerberos-keytab"
       },
     ]
-
-    # RadSec cert material — only injected when var.enable_radsec = true.
-    # The runtime feature flag in the DB controls whether the listener actually serves.
-    dynamic "secrets" {
-      for_each = var.enable_radsec ? [
-        { name = "RADSEC_SERVER_CERT_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-cert" },
-        { name = "RADSEC_SERVER_KEY_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-key" },
-        { name = "RADSEC_EAP_CERT_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-cert" },
-        { name = "RADSEC_EAP_KEY_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-server-key" },
-        { name = "RADSEC_CLIENT_CA_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-client-ca" },
-        { name = "RADSEC_EAP_CLIENT_CA_PEM", arn = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter/apexaegis/mgmt-plane/radsec-eap-client-ca" },
-      ] : []
-      content {
-        name      = secrets.value.name
-        valueFrom = secrets.value.arn
-      }
-    }
 
     logConfiguration = {
       logDriver = "awslogs"
