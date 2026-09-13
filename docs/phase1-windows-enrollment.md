@@ -13,67 +13,36 @@
 
 ---
 
-## Flow 1: Entra Join (Corporate-Owned Devices)
+## Flow 1: Entra Join (Corporate-Owned Devices) — Portal-Based
 
 This is the primary flow for company laptops. Users log in directly with their corporate identity.
 
-### Step 1: Configure SCP (Run Once as Local Admin)
+### Step 1: System Admin Downloads Enrollment Script
 
-Run this PowerShell script **as Local Administrator** on the Windows 11 machine:
+1. Visit **userportal.apexaegis.app/portal** (or **users.apexaegis.app/portal**)
+2. Click **"Download PowerShell Script (.ps1)"** or **"Download Batch Script (.bat)"**
+3. Transfer the script to the Windows machine (USB, network share, etc.)
 
-```powershell
-# ApexAegis DRS - Entra Join Configuration
-$drsEndpoint = "https://drs.apexaegis.app"
+### Step 2: Run Script as Local Administrator
 
-# 1. Configure SCP (Service Connection Point)
-$scpPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CPWS"
-if (-not (Test-Path $scpPath)) {
-    New-Item -Path $scpPath -Force | Out-Null
-}
-Set-ItemProperty -Path $scpPath -Name "URN" -Value "urn:drspr:1"
-Set-ItemProperty -Path $scpPath -Name "ProviderId" -Value "apexaegis-drs"
-Set-ItemProperty -Path $scpPath -Name "Version" -Value "1.0"
+1. Right-click the downloaded script → **"Run with PowerShell"** (or "Run as administrator")
+2. Enter your administrator password when prompted
+3. Script configures:
+   - SCP registry keys (points to DRS)
+   - Entra Join settings
+   - Windows Hello for Business
+4. **Restart** the computer
 
-# 2. Configure Enrollment Server
-$enrollmentPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CPWS\EnrollmentServer"
-if (-not (Test-Path $enrollmentPath)) {
-    New-Item -Path $enrollmentPath -Force | Out-Null
-}
-Set-ItemProperty -Path $enrollmentPath -Name "URL" -Value "$drsEndpoint/enrollmentserver/devicejoin"
-Set-ItemProperty -Path $enrollmentPath -Name "JoinURL" -Value "$drsEndpoint/enrollmentserver/devicejoin"
+### Step 3: User Logs in at OOBE (Out-of-Box Experience)
 
-# 3. Enable Entra Join (not just registration)
-$joinPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CloudDomainJoin"
-if (-not (Test-Path $joinPath)) {
-    New-Item -Path $joinPath -Force | Out-Null
-}
-Set-ItemProperty -Path $joinPath -Name "AutoWorkplaceJoin" -Value 0
-Set-ItemProperty -Path $joinPath -Name "CloudDomainJoinEnabled" -Value 1
+1. At the OOBE welcome screen, connect to Wi-Fi
+2. Windows shows the corporate-branded login page
+3. Enter your work email: `evelyn.ng@apexaegis.app`
+4. Browser opens → Login at `drs.apexaegis.app`
+5. Complete MFA (Windows Hello / Authenticator)
+6. Device is **fully Entra Joined**!
 
-# 4. Configure Windows Hello for Business
-$whfbPath = "HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork"
-if (-not (Test-Path $whfbPath)) {
-    New-Item -Path $whfbPath -Force | Out-Null
-}
-Set-ItemProperty -Path $whfbPath -Name "Enabled" -Value 1
-Set-ItemProperty -Path $whfbPath -Name "RequireSecurityDevice" -Value 1
-Set-ItemProperty -Path $whfbPath -Name "PinLength" -Value 6
-Set-ItemProperty -Path $whfbPath -Name "ExpirationPeriod" -Value 90
-
-Write-Host "DRS configured! Restart the computer." -ForegroundColor Green
-```
-
-### Step 2: User Logs in at OOBE (Out-of-Box Experience)
-
-1. **Restart** the computer (or do a fresh Windows install)
-2. At the OOBE welcome screen, connect to Wi-Fi
-3. Windows shows the corporate-branded login page
-4. Enter your work email: `evelyn.ng@apexaegis.app`
-5. Browser opens → Login at `drs.apexaegis.app`
-6. Complete MFA (Windows Hello / Authenticator)
-7. Device is **fully Entra Joined**!
-
-### Step 3: Configure Windows Hello
+### Step 4: Configure Windows Hello
 
 After successful join:
 1. Windows prompts to set up Windows Hello
@@ -81,7 +50,7 @@ After successful join:
 3. Set a **PIN** (backup for biometric)
 4. Future logins use biometric or PIN (no password needed)
 
-### Step 4: MDM Pushes Agent (Automatic)
+### Step 5: MDM Pushes Agent (Automatic)
 
 After device join, MDM check-in happens automatically:
 1. Windows does SyncML check-in to `/mdm/checkin`
@@ -89,7 +58,7 @@ After device join, MDM check-in happens automatically:
 3. Agent MSI is downloaded and installed
 4. Agent starts, uses the existing device cert
 
-### Step 5: Verify Enrollment
+### Step 6: Verify Enrollment
 
 ```powershell
 # Check device join status
@@ -135,6 +104,28 @@ For personal devices where you want app-level SSO but not full device management
 
 ---
 
+## User Portal Endpoints
+
+The user portal is available at `drs.apexaegis.app/portal`:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /portal` | Main portal page with download buttons |
+| `GET /portal/enroll` | Step-by-step enrollment guide |
+| `GET /portal/scripts/ps1` | Download PowerShell enrollment script |
+| `GET /portal/scripts/bat` | Download batch enrollment script |
+| `GET /portal/scripts/registry` | Download registry file for manual config |
+
+### Portal UI
+
+The portal provides a clean, user-friendly interface:
+- **Download buttons** for PowerShell and batch scripts
+- **Step-by-step instructions** for enrollment
+- **Troubleshooting tips** for common issues
+- **Links to enrollment guide** for detailed instructions
+
+---
+
 ## Zero-Touch Enrollment (IT Admin Provisioning)
 
 For IT admins provisioning new laptops before handing them to users.
@@ -144,15 +135,12 @@ For IT admins provisioning new laptops before handing them to users.
 ```powershell
 # Run as Local Administrator before handing laptop to user
 $drsEndpoint = "https://drs.apexaegis.app"
-$agentMSI = "https://releases.apexaegis.app/agent/latest/apexaegis-agent.msi"
 
-# 1. Configure SCP
-# (same registry config as above)
+# 1. Download script from portal
+Invoke-WebRequest -Uri "https://drs.apexaegis.app/portal/scripts/ps1" -OutFile "enroll.ps1"
 
-# 2. Pre-install agent (optional)
-$msiPath = "$env:TEMP\apexaegis-agent.msi"
-Invoke-WebRequest -Uri $agentMSI -OutFile $msiPath
-Start-Process msiexec.exe -ArgumentList "/i", $msiPath, "/qn" -Wait
+# 2. Run the script
+.\enroll.ps1
 
 # 3. Hand laptop to user
 # User does OOBE → Entra Join → Agent uses existing cert
@@ -165,13 +153,16 @@ Start-Process msiexec.exe -ArgumentList "/i", $msiPath, "/qn" -Wait
 $drsEndpoint = "https://drs.apexaegis.app"
 $enrolToken = "apx_..." # Get this from MP admin console
 
-# 1. Configure SCP
-# (same registry config as above)
+# 1. Download script from portal
+Invoke-WebRequest -Uri "https://drs.apexaegis.app/portal/scripts/ps1" -OutFile "enroll.ps1"
 
-# 2. Install agent with enrollment token
+# 2. Run the script
+.\enroll.ps1
+
+# 3. Install agent with enrollment token
 msiexec.exe /i $agentMSI /qn ENROL_TOKEN=$enrolToken DRS_URL=$drsEndpoint
 
-# 3. Agent handles everything automatically
+# 4. Agent handles everything automatically
 # - Registers with DRS
 # - Gets cert from step-ca
 # - Stores device identity
@@ -180,6 +171,12 @@ msiexec.exe /i $agentMSI /qn ENROL_TOKEN=$enrolToken DRS_URL=$drsEndpoint
 ---
 
 ## Troubleshooting
+
+### Portal not accessible
+
+- Check DNS: `drs.apexaegis.app` should resolve to the management plane
+- Check firewall: Portal requires HTTPS (port 443)
+- Check certificate: Ensure valid TLS certificate for `drs.apexaegis.app`
 
 ### Entra Join doesn't appear at OOBE
 
@@ -231,8 +228,20 @@ Get-WmiObject -Namespace "root\cimv2\Security\MicrosoftTpm" -Class Win32_Tpm
 │                    Windows 11 Machine                            │
 │                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │ OOBE /       │───→│ DRS Device   │───→│ OIDC Login   │      │
-│  │ Settings     │    │ Join         │    │ Page         │      │
+│  │ System Admin │───→│ User Portal  │───→│ Download     │      │
+│  │              │    │ /portal      │    │ .ps1/.bat    │      │
+│  └──────────────┘    └──────────────┘    └──────────────┘      │
+│         │                    │                    │              │
+│         ▼                    ▼                    ▼              │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
+│  │ Run Script   │───→│ Configure    │───→│ Restart      │      │
+│  │ as Admin     │    │ SCP Registry │    │ Computer     │      │
+│  └──────────────┘    └──────────────┘    └──────────────┘      │
+│                                              │                  │
+│                                              ▼                  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
+│  │ OOBE Login   │───→│ DRS Device   │───→│ OIDC Login   │      │
+│  │ Screen       │    │ Join         │    │ Page         │      │
 │  └──────────────┘    └──────────────┘    └──────────────┘      │
 │         │                    │                    │              │
 │         ▼                    ▼                    ▼              │
@@ -282,14 +291,14 @@ Get-WmiObject -Namespace "root\cimv2\Security\MicrosoftTpm" -Class Win32_Tpm
 
 ## Summary
 
-### Entra Join (Corporate-Owned)
-1. **SCP configured** via registry (no AD DS needed)
-2. **OOBE flow** — user enters corporate email
-3. **Device fully joined** — not just registered
-4. **PRT issued** — offline SSO via TPM-bound token
-5. **Windows Hello** — biometric/PIN authentication
-6. **MDM pushes agent** — full device management
-7. **User logs in** with corporate identity from day one
+### Entra Join (Corporate-Owned) — Portal-Based Flow
+1. **System admin** visits `userportal.apexaegis.app/portal`
+2. **Downloads** .ps1 or .bat enrollment script
+3. **Runs script** as local admin on Windows machine
+4. **Script configures** SCP registry keys (no manual config needed)
+5. **User restarts** and does OOBE
+6. **Enters work email** → Device is fully Entra Joined
+7. **MDM pushes agent** → Full device management
 
 ### Add Work Account (BYOD)
 1. **Settings → Access work or school → Connect**
@@ -298,8 +307,9 @@ Get-WmiObject -Namespace "root\cimv2\Security\MicrosoftTpm" -Class Win32_Tpm
 4. **Personal account remains primary**
 
 ### Zero-Touch (IT Admin)
-1. **Pre-configure SCP** before handing laptop to user
-2. **User does OOBE** — device is Entra Joined automatically
-3. **No local admin needed** — everything is automated
+1. **Download script** from portal
+2. **Run script** before handing laptop to user
+3. **User does OOBE** — device is Entra Joined automatically
+4. **No local admin needed** — everything is automated
 
 **No Kerberos, no ADDC, no pre-logon tunnel needed!**
