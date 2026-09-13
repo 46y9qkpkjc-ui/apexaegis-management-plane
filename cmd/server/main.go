@@ -39,6 +39,7 @@ import (
 	"github.com/zcp/management-plane/internal/identity"
 	"github.com/zcp/management-plane/internal/mdm"
 	"github.com/zcp/management-plane/internal/oidc"
+	"github.com/zcp/management-plane/internal/portal"
 	"github.com/zcp/management-plane/internal/policy"
 	"github.com/zcp/management-plane/internal/scanner"
 	"github.com/zcp/management-plane/internal/scep"
@@ -396,7 +397,14 @@ func main() {
 	router.GET("/mdm/enrollment", windowsDRSHandler.HandleMDMEnrollment)
 
 	logger.Info("DRS service initialized", zap.String("ca_url", caURL),
-		zap.String("windows_enrollment", drsIssuer+"/enrollmentserver/mgmtmanage"))
+		zap.String("windows_enrollment", drsIssuer+"/enrollmentserver/devicejoin"))
+
+	// User Portal for device enrollment (public — no JWT required)
+	portalHandler := portal.NewHandler(drsIssuer, logger)
+	portalGroup := router.Group("/portal")
+	portalHandler.RegisterRoutes(portalGroup)
+
+	logger.Info("User portal initialized", zap.String("portal_url", drsIssuer+"/portal"))
 
 	// Authentication API (public — no JWT required)
 	authAPI := router.Group("/api/v1/auth")
