@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zcp/management-plane/internal/oidc"
 	"go.uber.org/zap"
 )
 
@@ -35,7 +36,11 @@ type DRSPersister interface {
 	UpdateDevicePosture(ctx context.Context, orgID, deviceID string, managed, compliant, diskEncrypted, firewallActive bool) error
 	DeleteDevice(ctx context.Context, orgID, deviceID string) error
 	LogJoinEvent(ctx context.Context, deviceID, eventType, actor, actorID, fingerprint string, details map[string]interface{}) error
+	AuthenticateUser(ctx context.Context, email, password string) (*oidc.UserInfo, error)
 }
+
+// UserInfo is returned by AuthenticateUser (alias for oidc.UserInfo).
+type UserInfo = oidc.UserInfo
 
 // DeviceDirectory represents a device in our directory (your "Entra ID").
 type DeviceDirectory struct {

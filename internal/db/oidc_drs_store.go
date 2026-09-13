@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zcp/management-plane/internal/drs"
 	"github.com/zcp/management-plane/internal/oidc"
@@ -261,16 +262,11 @@ func verifyPassword(ctx context.Context, db *DB, email, password string) error {
 }
 
 // bcryptCompare compares a bcrypt hash with a password.
-// Imports golang.org/x/crypto/bcrypt indirectly via the existing auth_store.
 func bcryptCompare(hash, password string) error {
-	// Delegate to the existing bcrypt infrastructure
-	// In production, import golang.org/x/crypto/bcrypt directly
 	if hash == "" {
 		return errors.New("no password set")
 	}
-	// Placeholder — the actual bcrypt comparison happens in auth_store.go
-	// For Phase 1, we validate through the existing auth endpoint
-	return nil
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
 // ─── DRS Device Directory Operations ───────────────────────────

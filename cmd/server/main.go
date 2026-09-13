@@ -115,6 +115,9 @@ func main() {
 		)
 	}
 
+	// Seed enrollment admin users (idempotent — skips if already exist)
+	seedEnrollmentUsers(dbConn, logger)
+
 	// ── Stores (CockroachDB Cloud backed) ──
 	policyStore := db.NewPolicyStore(dbConn, logger)
 	policyStore.LoadDefaults()
@@ -398,6 +401,13 @@ func main() {
 
 	logger.Info("DRS service initialized", zap.String("ca_url", caURL),
 		zap.String("windows_enrollment", drsIssuer+"/enrollmentserver/devicejoin"))
+
+	// Enrollment endpoints (public — called by PS1 enrollment script)
+	enrollmentGroup := router.Group("/enrollment")
+	{
+		enrollmentGroup.POST("/admin-verify", drsHandler.HandleAdminVerify)
+		enrollmentGroup.POST("/device-join", drsHandler.HandleDeviceJoin)
+	}
 
 	// User Portal for device enrollment (public — no JWT required)
 	portalHandler := portal.NewHandler(drsIssuer, logger)
@@ -1517,4 +1527,33 @@ func cefHeaderEscape(value string) string {
 
 func cefEscape(value string) string {
 	return strings.NewReplacer("\\", "\\\\", "=", "\\=", "|", "\\|", "\n", "\\n", "\r", "\\r").Replace(value)
+}
+
+// seedEnrollmentUsers creates admin users for DRS device enrollment (idempotent).
+func seedEnrollmentUsers(dbConn *db.DB, logger *zap.Logger) {
+	type seedUser struct {
+		email    string
+		name     string
+		passHash string
+	}
+	users := []seedUser{
+		{"james.anderson@apexaegis.app", "James Anderson", "$2a$10$QC72fnaIBDaKRdcg8Zb7Yeg798N8hTzlVMSZD/WSHanggzttv8dSO"},
+		{"arunkumar.subbiah@apexaegis.app", "Arunkumar Subbiah", "$2a$10$ydUPArdPyUCMSsFg3lDx8e8acrhpNuPKx7IJcSYHQmWQrL8QXtuRS"},
+	}
+	for _, u := range users {
+		var exists bool
+		_ = dbConn.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM system_mgmt.users WHERE email = $1)", u.email).Scan(&exists)
+		if exists {
+			continue
+		}
+		_, err := dbConn.ExecContext(context.Background(), `
+			INSERT INTO system_mgmt.users (org_id, email, name, role, password_hash, mfa_enabled, status)
+			VALUES ('a0000000-0000-0000-0000-000000000001', $1, $2, 'org_admin', $3, false, 'active')
+		`, u.email, u.name, u.passHash)
+		if err != nil {
+			logger.Warn("seed enrollment user failed", zap.String("email", u.email), zap.Error(err))
+		} else {
+			logger.Info("seeded enrollment user", zap.String("email", u.email))
+		}
+	}
 }

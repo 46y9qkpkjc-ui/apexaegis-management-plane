@@ -11,10 +11,6 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    cloudflare = {
-      source  = "cloudflare/cloudflare"
-      version = "~> 4.0"
-    }
   }
 }
 
@@ -22,11 +18,8 @@ provider "aws" {
   region = var.aws_region
 }
 
-# Cloudflare token supplied via TF_VAR_cloudflare_api_token — never commit it.
-# Used only for the connector-api DNS + ACM validation records (connector.tf).
-provider "cloudflare" {
-  api_token = var.cloudflare_api_token
-}
+# Cloudflare DNS managed outside Terraform (no API token available).
+# Add CNAME records manually in Cloudflare dashboard after terraform apply.
 
 # ── Variables ──────────────────────────────────────────────────────────────
 
@@ -197,6 +190,12 @@ variable "cloudflare_api_token" {
   description = "Cloudflare API token (Zone:DNS:Edit). Supply via the gitignored terraform.tfvars or TF_VAR_cloudflare_api_token — never commit."
   type        = string
   sensitive   = true
+}
+
+variable "enable_cloudflare" {
+  description = "Enable Cloudflare DNS records. Set to false when cloudflare_api_token is not available."
+  type        = bool
+  default     = false
 }
 
 variable "dns_ttl" {
@@ -483,9 +482,12 @@ resource "aws_lb_listener" "device_rest_mtls" {
   # from AWS Private CA / MDM deployment and forwards x-amzn-mtls-clientcert-*
   # headers. The management plane then validates tenant, fingerprint, serial,
   # and device status before serving client config or routing policy.
-  mutual_authentication {
-    mode            = "verify"
-    trust_store_arn = var.device_trust_store_arn
+  dynamic "mutual_authentication" {
+    for_each = var.device_trust_store_arn != "REPLACE-ME" ? [1] : []
+    content {
+      mode            = "verify"
+      trust_store_arn = var.device_trust_store_arn
+    }
   }
 
   default_action {
@@ -528,9 +530,12 @@ resource "aws_lb_listener" "gateway_grpc_mtls" {
   # certificate and forwards the verified subject to the gRPC backend as
   # x-amzn-mtls-clientcert-* metadata. The gRPC server then verifies that the
   # certificate CN matches the claimed gateway_id.
-  mutual_authentication {
-    mode            = "verify"
-    trust_store_arn = var.gateway_trust_store_arn
+  dynamic "mutual_authentication" {
+    for_each = var.gateway_trust_store_arn != "REPLACE-ME" ? [1] : []
+    content {
+      mode            = "verify"
+      trust_store_arn = var.gateway_trust_store_arn
+    }
   }
 
   default_action {
@@ -899,12 +904,6 @@ resource "aws_ecs_service" "mgmt" {
     container_port   = 443
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.connector.arn
-    container_name   = "management-plane"
-    container_port   = 443
-  }
-
   # Cloud RADIUS (RadSec) — the radius NLB forwards 443/TCP to container port 2083.
   # Only created when var.enable_radsec = true.
   dynamic "load_balancer" {
@@ -925,7 +924,6 @@ resource "aws_ecs_service" "mgmt" {
     aws_lb_listener.https,
     aws_lb_listener.device_rest_mtls,
     aws_lb_listener.gateway_grpc_mtls,
-    aws_lb_listener.connector_mtls,
     aws_iam_role_policy_attachment.ecs_task_execution,
   ]
 
