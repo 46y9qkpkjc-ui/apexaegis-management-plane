@@ -1,18 +1,25 @@
 // Package agentfile serves agent/installer downloads with version support.
-// On ECS Fargate, files are stored in S3 and served via redirect.
+// On ECS Fargate, files are stored in S3 and proxied through the management plane.
 package agentfile
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
 // Handler serves agent binaries and installer files.
 type Handler struct {
+	s3Client *s3.Client
 	s3Bucket string
 	s3Region string
 	logger   *zap.Logger
@@ -20,14 +27,30 @@ type Handler struct {
 
 // NewHandler creates a new agent file handler.
 func NewHandler(s3Bucket, s3Region string, logger *zap.Logger) *Handler {
-	return &Handler{s3Bucket: s3Bucket, s3Region: s3Region, logger: logger}
+	return &Handler{
+		s3Bucket: s3Bucket,
+		s3Region: s3Region,
+		logger:   logger,
+	}
+}
+
+// initS3Client lazily initializes the S3 client on first use.
+func (h *Handler) initS3Client(ctx context.Context) error {
+	if h.s3Client != nil {
+		return nil
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(h.s3Region))
+	if err != nil {
+		return fmt.Errorf("load AWS config: %w", err)
+	}
+	h.s3Client = s3.NewFromConfig(cfg)
+	return nil
 }
 
 // FileEntry represents a downloadable file.
 type FileEntry struct {
 	Version  string `json:"version"`
 	Filename string `json:"filename"`
-	Size     int64  `json:"size,omitempty"`
 	Path     string `json:"path"`
 }
 
@@ -64,7 +87,7 @@ func (h *Handler) HandleLatest(c *gin.Context) {
 	})
 }
 
-// HandleDownload redirects to the S3 URL for the requested file.
+// HandleDownload proxies the file from S3 to the client.
 // Query params: ?version=v0.1.0&file=ApexAegis-Setup.exe
 func (h *Handler) HandleDownload(c *gin.Context) {
 	version := c.Query("version")
@@ -75,24 +98,55 @@ func (h *Handler) HandleDownload(c *gin.Context) {
 		return
 	}
 
-	// Sanitize
 	version = strings.TrimPrefix(version, "/")
 	filename = strings.TrimPrefix(filename, "/")
 
-	s3URL := h.s3URL(version, filename)
-	c.Redirect(http.StatusTemporaryRedirect, s3URL)
-}
+	// Initialize S3 client on first request
+	if err := h.initS3Client(c.Request.Context()); err != nil {
+		h.logger.Error("failed to initialize S3 client", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "storage not available"})
+		return
+	}
 
-// s3URL builds the public S3 URL for a file.
-func (h *Handler) s3URL(version, filename string) string {
-	return "https://" + h.s3Bucket + ".s3." + h.s3Region + ".amazonaws.com/" + version + "/" + filename
+	s3Key := version + "/" + filename
+
+	result, err := h.s3Client.GetObject(c.Request.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(h.s3Bucket),
+		Key:    aws.String(s3Key),
+	})
+	if err != nil {
+		h.logger.Error("failed to get object from S3",
+			zap.String("bucket", h.s3Bucket),
+			zap.String("key", s3Key),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+	defer result.Body.Close()
+
+	ext := strings.ToLower(filename[strings.LastIndex(filename, "."):])
+	switch ext {
+	case ".msi":
+		c.Header("Content-Type", "application/x-msi")
+	case ".exe":
+		c.Header("Content-Type", "application/x-msdownload")
+	default:
+		c.Header("Content-Type", "application/octet-stream")
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	if result.ContentLength != nil {
+		c.Header("Content-Length", fmt.Sprintf("%d", *result.ContentLength))
+	}
+
+	c.Status(http.StatusOK)
+	if _, err := io.Copy(c.Writer, result.Body); err != nil {
+		h.logger.Error("failed to stream file to client", zap.Error(err))
+	}
 }
 
 // listVersions returns the known versions and files.
-// Since we can't list S3 without AWS SDK, we use a known structure.
 func (h *Handler) listVersions() []FileEntry {
-	// Known files — in production this could be cached or use S3 listing.
-	// For now, return the files the Windows developer uploaded.
 	var entries []FileEntry
 
 	knownFiles := []struct {
@@ -106,7 +160,7 @@ func (h *Handler) listVersions() []FileEntry {
 		entries = append(entries, FileEntry{
 			Version:  f.Version,
 			Filename: f.Filename,
-			Path:     "/api/v1/agent/download/" + f.Version + "/" + f.Filename,
+			Path:     "/api/v1/agent/download/file?version=" + f.Version + "&file=" + f.Filename,
 		})
 	}
 
