@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/zcp/management-plane/internal/agentfile"
 	"github.com/zcp/management-plane/internal/api/handlers"
 	"github.com/zcp/management-plane/internal/api/middleware"
 	"github.com/zcp/management-plane/internal/assistant"
@@ -669,6 +670,13 @@ func main() {
 		kerberosSSOHandler := handlers.NewKerberosSSOHandler(
 			kerberosValidator, deviceStore, db.NewDirectoryStore(dbConn, logger), authStore, logger)
 		agentAPI.POST("/sso/kerberos", kerberosSSOHandler.Authenticate)
+
+		// Agent/installer file downloads (public — no auth required for initial download)
+		agentAssetsDir := envOrDefault("AGENT_ASSETS_DIR", "/assets/agent")
+		agentFileHandler := agentfile.NewHandler(agentAssetsDir, logger)
+		agentAPI.GET("/download/versions", agentFileHandler.HandleListVersions)
+		agentAPI.GET("/download/latest", agentFileHandler.HandleLatest)
+		agentAPI.GET("/download/:version/:filename", agentFileHandler.HandleDownload)
 	}
 
 	// Device-authenticated client runtime configuration endpoints.
