@@ -4,6 +4,8 @@
 
 The enrollment PS1 script downloads and installs the ApexAegis agent MSI. The management plane serves the MSI via `/api/v1/agent/download`.
 
+**Important:** The management plane runs on **ECS Fargate** (no persistent local disk). Agent files must be stored in **S3** and served from there.
+
 ---
 
 ## Step 1: Build the Agent Binary
@@ -77,32 +79,46 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ApexAegis_0.1.0_x64-
 
 ---
 
-## Step 3: Upload to Management Plane
+## Step 3: Upload to S3
 
-Upload the MSI/EXE to the management plane server so the enrollment script can download it.
+The management plane runs on ECS Fargate with no persistent disk. Upload the MSI to S3.
 
-### Option A: Upload via SCP
+### AWS Account: `184353710603`
+### Region: `ap-southeast-1`
+### S3 Bucket: `apexaegis-agent-assets`
 
 ```powershell
-# From your Windows machine
-scp dist/ApexAegis-Setup.msi ec2-user@<MGMT_PLANE_IP>:/assets/agent/v0.1.0/
+# From Windows (AWS CLI v2 required)
+aws configure  # Enter your AWS credentials if not already configured
+
+# Upload the MSI
+aws s3 cp ApexAegis-Setup.msi s3://apexaegis-agent-assets/v0.1.0/ApexAegis-Setup.msi --region ap-southeast-1
+
+# Upload the EXE (optional)
+aws s3 cp ApexAegis-Setup.exe s3://apexaegis-agent-assets/v0.1.0/ApexAegis-Setup.exe --region ap-southeast-1
 ```
 
-### Option B: Upload via S3
+### Create the S3 Bucket (if it doesn't exist)
 
 ```bash
-# From any machine with AWS CLI
-aws s3 cp ApexAegis-Setup.msi s3://apexaegis-assets/agent/v0.1.0/ApexAegis-Setup.msi
+aws s3 mb s3://apexaegis-agent-assets --region ap-southeast-1
 ```
 
-### Option C: Direct upload to the container
+### Set Public Read (for download access)
 
 ```bash
-# Get the ECS task ID
-TASK_ID=$(aws ecs list-tasks --cluster apexaegis-mgmt --service apexaegis-mgmt-plane --region ap-southeast-1 --query 'taskArns[0]' --output text | awk -F/ '{print $NF}')
-
-# Copy file to the running container
-docker cp ApexAegis-Setup.msi $(docker ps -q --filter "id=$TASK_ID"):/assets/agent/v0.1.0/
+aws s3api put-bucket-policy --bucket apexaegis-agent-assets --region ap-southeast-1 --policy '{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PublicRead",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::apexaegis-agent-assets/*"
+    }
+  ]
+}'
 ```
 
 ---
@@ -118,23 +134,23 @@ curl -k https://drs.apexaegis.app/api/v1/agent/download/versions
 # Get latest version info
 curl -k https://drs.apexaegis.app/api/v1/agent/download/latest
 
-# Download the MSI
-curl -k -O https://drs.apexaegis.app/api/v1/agent/download/v0.1.0/ApexAegis-Setup.msi
+# Download the MSI directly from S3 (bypassing API)
+curl -k -O https://apexaegis-agent-assets.s3.ap-southeast-1.amazonaws.com/v0.1.0/ApexAegis-Setup.msi
 ```
 
 ---
 
-## File Structure on Server
+## S3 File Structure
 
 ```
-/assets/agent/
+s3://apexaegis-agent-assets/
 ├── v0.1.0/
 │   ├── ApexAegis-Setup.msi
 │   └── ApexAegis-Setup.exe
 ├── v0.2.0/
 │   ├── ApexAegis-Setup.msi
 │   └── ApexAegis-Setup.exe
-└── latest -> v0.2.0/ (symlink, optional)
+└── latest/ (symlink or copy, optional)
 ```
 
 ---
@@ -173,3 +189,15 @@ AGENT_ASSETS_DIR=/assets/agent
 ```
 
 Default: `/assets/agent`
+
+**Note:** On ECS Fargate, this directory is ephemeral. For persistent storage, use S3 and update the download URL in the PS1 script to point directly to S3.
+
+---
+
+## Quick Reference (AWS Credentials)
+
+- **AWS Account:** `184353710603`
+- **Region:** `ap-southeast-1`
+- **S3 Bucket:** `apexaegis-agent-assets`
+- **ECS Cluster:** `apexaegis-mgmt`
+- **ECS Service:** `apexaegis-mgmt-plane`
