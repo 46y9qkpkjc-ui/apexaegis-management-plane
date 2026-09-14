@@ -395,6 +395,8 @@ func (h *WindowsHandler) SCPResponse(c *gin.Context) {
 		Version    string `json:"version"`
 		URI        string `json:"uri"`
 		JoinURI    string `json:"join_uri"`
+		Issuer     string `json:"issuer"`
+		SignInURL  string `json:"sign_in_url"`
 	}
 
 	scp := SCPRecord{
@@ -402,9 +404,23 @@ func (h *WindowsHandler) SCPResponse(c *gin.Context) {
 		Version:    "1.0",
 		URI:        h.svc.oidcISS + "/enrollmentserver/devicejoin",
 		JoinURI:    h.svc.oidcISS + "/enrollmentserver/devicejoin",
+		Issuer:     h.svc.oidcISS,
+		SignInURL:  h.svc.oidcISS + "/authorize?client_id=drs&response_type=code&scope=openid+email+profile",
 	}
 
 	c.JSON(http.StatusOK, scp)
+}
+
+// HandleAutodiscover handles Windows autodiscover after DNS SRV lookup.
+// GET /autodiscover/autodiscover.xml
+func (h *WindowsHandler) HandleAutodiscover(c *gin.Context) {
+	autodiscover := map[string]interface{}{
+		"DisplayName":     "ApexAegis DRS",
+		"UserSetting":     "ApexAegis Device Registration",
+		"RegistrationEndpoint": h.svc.oidcISS + "/enrollmentserver/scp",
+		"DeviceRegistrationServiceEndpoint": h.svc.oidcISS + "/enrollmentserver/devicejoin",
+	}
+	c.JSON(http.StatusOK, autodiscover)
 }
 
 // ─── Registry Configuration ────────────────────────────────────

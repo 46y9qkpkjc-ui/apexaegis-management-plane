@@ -399,6 +399,7 @@ func main() {
 	router.GET("/windows-hello/policy", windowsDRSHandler.HandleWindowsHelloPolicy)
 	router.POST("/windows-hello/attest", windowsDRSHandler.HandleWindowsHelloAttest)
 	router.GET("/mdm/enrollment", windowsDRSHandler.HandleMDMEnrollment)
+	router.GET("/autodiscover/autodiscover.xml", windowsDRSHandler.HandleAutodiscover)
 
 	logger.Info("DRS service initialized", zap.String("ca_url", caURL),
 		zap.String("windows_enrollment", drsIssuer+"/enrollmentserver/devicejoin"))
