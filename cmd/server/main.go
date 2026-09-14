@@ -678,7 +678,7 @@ func main() {
 		agentFileHandler := agentfile.NewHandler(agentS3Bucket, agentS3Region, logger)
 		agentAPI.GET("/download/versions", agentFileHandler.HandleListVersions)
 		agentAPI.GET("/download/latest", agentFileHandler.HandleLatest)
-		agentAPI.GET("/download/:version/:filename", agentFileHandler.HandleDownload)
+		agentAPI.GET("/download/file", agentFileHandler.HandleDownload)
 	}
 
 	// Device-authenticated client runtime configuration endpoints.

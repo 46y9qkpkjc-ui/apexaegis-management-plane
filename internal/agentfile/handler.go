@@ -35,7 +35,7 @@ type FileEntry struct {
 func (h *Handler) RegisterRoutes(router *gin.RouterGroup) {
 	router.GET("/versions", h.HandleListVersions)
 	router.GET("/latest", h.HandleLatest)
-	router.GET("/:version/:filename", h.HandleDownload)
+	router.GET("/file", h.HandleDownload)
 }
 
 // HandleListVersions returns all available versions and their files.
@@ -65,11 +65,17 @@ func (h *Handler) HandleLatest(c *gin.Context) {
 }
 
 // HandleDownload redirects to the S3 URL for the requested file.
+// Query params: ?version=v0.1.0&file=ApexAegis-Setup.exe
 func (h *Handler) HandleDownload(c *gin.Context) {
-	version := c.Param("version")
-	filename := c.Param("filename")
+	version := c.Query("version")
+	filename := c.Query("file")
 
-	// Sanitize path components
+	if version == "" || filename == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "version and file query params required"})
+		return
+	}
+
+	// Sanitize
 	version = strings.TrimPrefix(version, "/")
 	filename = strings.TrimPrefix(filename, "/")
 
