@@ -1,11 +1,9 @@
 // Package agentfile serves agent/installer downloads with version support.
+// On ECS Fargate, files are stored in S3 and served via redirect.
 package agentfile
 
 import (
-	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -15,23 +13,22 @@ import (
 
 // Handler serves agent binaries and installer files.
 type Handler struct {
-	assetsDir string
-	logger    *zap.Logger
+	s3Bucket string
+	s3Region string
+	logger   *zap.Logger
 }
 
 // NewHandler creates a new agent file handler.
-// assetsDir is the path to the directory containing agent binaries
-// (e.g. /assets/agent with subdirectories like v0.1.0/).
-func NewHandler(assetsDir string, logger *zap.Logger) *Handler {
-	return &Handler{assetsDir: assetsDir, logger: logger}
+func NewHandler(s3Bucket, s3Region string, logger *zap.Logger) *Handler {
+	return &Handler{s3Bucket: s3Bucket, s3Region: s3Region, logger: logger}
 }
 
 // FileEntry represents a downloadable file.
 type FileEntry struct {
 	Version  string `json:"version"`
 	Filename string `json:"filename"`
-	Size     int64  `json:"size"`
-	Path     string `json:"path"` // download URL path
+	Size     int64  `json:"size,omitempty"`
+	Path     string `json:"path"`
 }
 
 // RegisterRoutes registers the agent file download routes.
@@ -54,7 +51,6 @@ func (h *Handler) HandleLatest(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no files available"})
 		return
 	}
-	// Group files by version, return latest
 	latestVersion := versions[0].Version
 	var files []FileEntry
 	for _, v := range versions {
@@ -68,95 +64,49 @@ func (h *Handler) HandleLatest(c *gin.Context) {
 	})
 }
 
-// HandleDownload serves a specific file.
+// HandleDownload redirects to the S3 URL for the requested file.
 func (h *Handler) HandleDownload(c *gin.Context) {
 	version := c.Param("version")
 	filename := c.Param("filename")
 
 	// Sanitize path components
-	version = filepath.Base(version)
-	filename = filepath.Base(filename)
+	version = strings.TrimPrefix(version, "/")
+	filename = strings.TrimPrefix(filename, "/")
 
-	filePath := filepath.Join(h.assetsDir, version, filename)
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
-		return
-	}
-
-	// Set appropriate content type based on extension
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".msi":
-		c.Header("Content-Type", "application/x-msi")
-	case ".exe":
-		c.Header("Content-Type", "application/x-msdownload")
-	case ".zip":
-		c.Header("Content-Type", "application/zip")
-	default:
-		c.Header("Content-Type", "application/octet-stream")
-	}
-
-	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
-	c.File(filePath)
+	s3URL := h.s3URL(version, filename)
+	c.Redirect(http.StatusTemporaryRedirect, s3URL)
 }
 
-// listVersions scans the assets directory and returns version info.
+// s3URL builds the public S3 URL for a file.
+func (h *Handler) s3URL(version, filename string) string {
+	return "https://" + h.s3Bucket + ".s3." + h.s3Region + ".amazonaws.com/" + version + "/" + filename
+}
+
+// listVersions returns the known versions and files.
+// Since we can't list S3 without AWS SDK, we use a known structure.
 func (h *Handler) listVersions() []FileEntry {
+	// Known files — in production this could be cached or use S3 listing.
+	// For now, return the files the Windows developer uploaded.
 	var entries []FileEntry
 
-	versionsDir := filepath.Join(h.assetsDir)
- dirs, err := os.ReadDir(versionsDir)
-	if err != nil {
-		h.logger.Warn("failed to read assets directory", zap.String("dir", versionsDir), zap.Error(err))
-		return entries
+	knownFiles := []struct {
+		Version  string
+		Filename string
+	}{
+		{"v0.1.0", "ApexAegis-Setup.exe"},
 	}
 
-	for _, dir := range dirs {
-		if !dir.IsDir() {
-			continue
-		}
-		version := dir.Name()
-		if !strings.HasPrefix(version, "v") {
-			version = "v" + version
-		}
-
-		filesDir := filepath.Join(versionsDir, dir.Name())
-		files, err := os.ReadDir(filesDir)
-		if err != nil {
-			continue
-		}
-
-		for _, file := range files {
-			if file.IsDir() {
-				continue
-			}
-			info, err := file.Info()
-			if err != nil {
-				continue
-			}
-			entries = append(entries, FileEntry{
-				Version:  version,
-				Filename: file.Name(),
-				Size:     info.Size(),
-				Path:     "/api/v1/agent/download/" + version + "/" + file.Name(),
-			})
-		}
+	for _, f := range knownFiles {
+		entries = append(entries, FileEntry{
+			Version:  f.Version,
+			Filename: f.Filename,
+			Path:     "/api/v1/agent/download/" + f.Version + "/" + f.Filename,
+		})
 	}
 
-	// Sort by version descending (latest first)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Version > entries[j].Version
 	})
 
 	return entries
-}
-
-// VersionInfo is the JSON response for /api/v1/agent/download/versions.
-type VersionInfo struct {
-	Versions []FileEntry `json:"versions"`
-}
-
-func init() {
-	// Ensure json is used
-	_ = json.Marshal
 }
