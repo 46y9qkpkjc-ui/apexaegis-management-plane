@@ -1,5 +1,4 @@
-// Package portal handles the user-facing portal for device enrollment.
-// This provides a web UI for users to download enrollment scripts.
+// Package portal handles script downloads for device enrollment.
 package portal
 
 import (
@@ -9,12 +8,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// PortalFrontendURL is the URL of the React portal page in the web UI.
-	PortalFrontendURL = "https://www.apexaegis.app/sysadmin/portal"
-)
-
-// Handler serves the user portal for device enrollment.
+// Handler serves enrollment script downloads.
 type Handler struct {
 	drsIssuer string
 	logger    *zap.Logger
@@ -25,26 +19,11 @@ func NewHandler(drsIssuer string, logger *zap.Logger) *Handler {
 	return &Handler{drsIssuer: drsIssuer, logger: logger}
 }
 
-// RegisterRoutes registers the portal routes.
+// RegisterRoutes registers the script download routes.
 func (h *Handler) RegisterRoutes(router *gin.RouterGroup) {
-	portal := router.Group("")
-	{
-		portal.GET("/", h.HandlePortalRedirect)
-		portal.GET("/enroll", h.HandleEnrollRedirect)
-		portal.GET("/scripts/ps1", h.HandleDownloadPS1)
-		portal.GET("/scripts/bat", h.HandleDownloadBAT)
-		portal.GET("/scripts/registry", h.HandleDownloadRegistry)
-	}
-}
-
-// HandlePortalRedirect redirects /portal/ to the React portal page.
-func (h *Handler) HandlePortalRedirect(c *gin.Context) {
-	c.Redirect(http.StatusTemporaryRedirect, PortalFrontendURL)
-}
-
-// HandleEnrollRedirect redirects /portal/enroll to the React portal page.
-func (h *Handler) HandleEnrollRedirect(c *gin.Context) {
-	c.Redirect(http.StatusTemporaryRedirect, PortalFrontendURL)
+	router.GET("/scripts/ps1", h.HandleDownloadPS1)
+	router.GET("/scripts/bat", h.HandleDownloadBAT)
+	router.GET("/scripts/registry", h.HandleDownloadRegistry)
 }
 
 // HandleDownloadPS1 serves the PowerShell enrollment script.
@@ -121,7 +100,7 @@ func (h *Handler) HandleDownloadPS1(c *gin.Context) {
 	script += "    if ($authResp.authorized -eq $true) {\n"
 	script += "        Write-OK \"Credentials verified for $($authResp.email)\"\n"
 	script += "    } else {\n"
-script += "        Write-Fail \"Credentials not authorized. Check your email and password.\"\n"
+	script += "        Write-Fail \"Credentials not authorized. Check your email and password.\"\n"
 	script += "        pause\n"
 	script += "        exit 1\n"
 	script += "    }\n"
@@ -258,7 +237,6 @@ func (h *Handler) HandleDownloadBAT(c *gin.Context) {
 
 // HandleDownloadRegistry serves a registry file for manual SCP configuration.
 func (h *Handler) HandleDownloadRegistry(c *gin.Context) {
-	drsEndpoint := h.drsIssuer
 	reg := "Windows Registry Editor Version 5.00\n\n"
 	reg += "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CPWS]\n"
 	reg += "\"URN\"=\"urn:drspr:1\"\n"
@@ -266,8 +244,6 @@ func (h *Handler) HandleDownloadRegistry(c *gin.Context) {
 	reg += "\n"
 	reg += "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CloudDomainJoin\\JoinInfo]\n"
 	reg += "\"AutoWorkplaceJoin\"=dword:00000001\n"
-
-	_ = drsEndpoint // used in PS1/BAT scripts via string concatenation
 
 	c.Header("Content-Type", "application/octet-stream")
 	c.Header("Content-Disposition", "attachment; filename=\"ApexAegis-SCP.reg\"")

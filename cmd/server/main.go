@@ -409,12 +409,12 @@ func main() {
 		enrollmentGroup.POST("/device-join", drsHandler.HandleDeviceJoin)
 	}
 
-	// User Portal for device enrollment (public — no JWT required)
+	// Enrollment script downloads (public — no JWT required)
 	portalHandler := portal.NewHandler(drsIssuer, logger)
 	portalGroup := router.Group("/portal")
 	portalHandler.RegisterRoutes(portalGroup)
 
-	logger.Info("User portal initialized", zap.String("portal_url", drsIssuer+"/portal"))
+	logger.Info("Enrollment scripts initialized", zap.String("scripts_url", drsIssuer+"/portal/scripts"))
 
 	// Authentication API (public — no JWT required)
 	authAPI := router.Group("/api/v1/auth")
